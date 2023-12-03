@@ -21,15 +21,15 @@ from torch.utils.data.distributed import DistributedSampler
 from colossalai.amp.naive_amp.mixed_precision_optimizer import MixedPrecisionOptimizer
 from colossalai.checkpoint_io import CheckpointIO, HybridParallelCheckpointIO
 from colossalai.cluster import ProcessGroupMesh
-from colossalai.interface import ModelWrapper, OptimizerWrapper
+from colossalai.interface import ModelWrapper, OptimizerWrapper, AMPModelMixin
 from colossalai.pipeline.schedule import InterleavedSchedule, OneForwardOneBackwardSchedule
 from colossalai.pipeline.stage_manager import PipelineStageManager
 from colossalai.shardformer import ShardConfig, ShardFormer
 from colossalai.shardformer.layer.utils import SeqParallelUtils
 from colossalai.shardformer.policies.base_policy import Policy
 from colossalai.tensor.d_tensor.api import is_distributed_tensor
-from colossalai.zero.low_level import LowLevelZeroOptimizer
 from colossalai.utils.device import get_current_device
+from colossalai.zero.low_level import LowLevelZeroOptimizer
 
 from .pp_plugin_base import PipelinePluginBase
 
@@ -42,7 +42,7 @@ def _convert_floating_point(x, dtype: torch.dtype = torch.float16):
     return x
 
 
-class HybridParallelModule(ModelWrapper):
+class HybridParallelModule(ModelWrapper, AMPModelMixin):
     def __init__(
         self,
         module: Module,
@@ -385,7 +385,9 @@ class HybridParallelNaiveOptimizer(OptimizerWrapper):
 
                 total_norm_exponentiated += grad_norm_exponentiated
 
-            total_norm_exponentiated_cuda = torch.tensor([float(total_norm_exponentiated)], device=get_current_device(), dtype=torch.float32)
+            total_norm_exponentiated_cuda = torch.tensor(
+                [float(total_norm_exponentiated)], device=get_current_device(), dtype=torch.float32
+            )
             if self.tp_size > 1:
                 # compute norm in tp process group
                 dist.all_reduce(tensor=total_norm_exponentiated_cuda, op=dist.ReduceOp.SUM, group=self.tp_pg)
@@ -586,7 +588,9 @@ class HybridParallelAMPOptimizer(MixedPrecisionOptimizer):
 
                 total_norm_exponentiated += grad_norm_exponentiated
 
-            total_norm_exponentiated_cuda = torch.tensor([float(total_norm_exponentiated)], device=get_current_device(), dtype=torch.float32)
+            total_norm_exponentiated_cuda = torch.tensor(
+                [float(total_norm_exponentiated)], device=get_current_device(), dtype=torch.float32
+            )
             if self.tp_size > 1:
                 # compute norm in tp process group
                 dist.all_reduce(tensor=total_norm_exponentiated_cuda, op=dist.ReduceOp.SUM, group=self.tp_pg)
@@ -837,7 +841,9 @@ class HybridParallelZeroOptimizer(LowLevelZeroOptimizer):
 
                 total_norm_exponentiated += grad_norm_exponentiated
 
-            total_norm_exponentiated_cuda = torch.tensor([float(total_norm_exponentiated)], device=get_current_device(), dtype=torch.float32)
+            total_norm_exponentiated_cuda = torch.tensor(
+                [float(total_norm_exponentiated)], device=get_current_device(), dtype=torch.float32
+            )
             if dp_size > 1:
                 # compute norm in dp process group
                 dist.all_reduce(tensor=total_norm_exponentiated_cuda, op=dist.ReduceOp.SUM, group=self.dp_pg)

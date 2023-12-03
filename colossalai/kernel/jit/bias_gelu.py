@@ -1,3 +1,4 @@
+# Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
 import torch
 
 ###### BIAS GELU FUSION/ NO AUTOGRAD ################
@@ -28,7 +29,6 @@ def bias_gelu_back(g, bias, y):
 
 
 class GeLUFunction(torch.autograd.Function):
-
     @staticmethod
     # bias is an optional argument
     def forward(ctx, input, bias):

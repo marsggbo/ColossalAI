@@ -1,9 +1,11 @@
-from typing import List, Union, Any
-from ..proxy import ColoProxy, ColoAttribute
-import torch
-from .meta_patch import meta_patched_function, meta_patched_module
+from typing import Any, List, Union
 
-__all__ = ['is_element_in_list', 'extract_meta']
+import torch
+
+from ..proxy import ColoProxy
+from .meta_patch import meta_patched_function
+
+__all__ = ["is_element_in_list", "extract_meta"]
 
 
 def is_element_in_list(elements: Union[List[Any], Any], list_: List[Any]):
@@ -19,7 +21,6 @@ def is_element_in_list(elements: Union[List[Any], Any], list_: List[Any]):
 
 
 def extract_meta(*args, **kwargs):
-
     def _convert(val):
         if isinstance(val, ColoProxy):
             return val.meta_data

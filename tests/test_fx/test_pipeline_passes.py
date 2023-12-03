@@ -1,12 +1,13 @@
 import torch
-import torch.nn as nn
-import colossalai
-import colossalai.nn as col_nn
 from torch.fx import symbolic_trace
-from colossalai.fx.passes.adding_split_node_pass import split_with_split_nodes_pass, balanced_split_pass, \
-                                                        uniform_split_pass, balanced_split_pass_v2
 
-import pytest
+from colossalai.fx.passes.adding_split_node_pass import (
+    balanced_split_pass,
+    balanced_split_pass_v2,
+    split_with_split_nodes_pass,
+    uniform_split_pass,
+)
+from colossalai.testing import clear_cache_before_run
 
 MODEL_DIM = 16
 BATCH_SIZE = 8
@@ -14,7 +15,6 @@ PIPELINE_SIZE = 2
 
 
 class MLP(torch.nn.Module):
-
     def __init__(self, dim: int):
         super().__init__()
         self.linear1 = torch.nn.Linear(dim, dim)
@@ -39,6 +39,7 @@ def pipeline_pass_test_helper(model, data, pass_func):
     assert output.equal(origin_output)
 
 
+@clear_cache_before_run()
 def test_pipeline_passes():
     model = MLP(MODEL_DIM)
     data = torch.rand(BATCH_SIZE, MODEL_DIM)
@@ -47,5 +48,5 @@ def test_pipeline_passes():
     pipeline_pass_test_helper(model, data, uniform_split_pass)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     test_pipeline_passes()

@@ -1,110 +1,169 @@
+import math
+
 import pytest
 import torch
 from einops import rearrange
 
-from colossalai.kernel.cuda_native.flash_attention import HAS_FLASH_ATTN, HAS_TRITON
+from colossalai.kernel.cuda_native.mha.flash_attn_2 import HAS_FLASH_ATTN
+from colossalai.kernel.cuda_native.mha.mem_eff_attn import HAS_MEM_EFF_ATTN
+from colossalai.testing import clear_cache_before_run, parameterize
 
-if HAS_FLASH_ATTN:
-    from colossalai.kernel.cuda_native.flash_attention import (
-        flash_attention_q_k_v, flash_attention_q_kv, flash_attention_qkv)
+if HAS_MEM_EFF_ATTN or HAS_FLASH_ATTN:
+    from colossalai.kernel.cuda_native import ColoAttention
+    from colossalai.kernel.cuda_native.scaled_softmax import AttnMaskType
 
-if HAS_TRITON:
-    from colossalai.kernel.cuda_native.flash_attention import triton_flash_attention
-
-
-def baseline_attention(Z, N_CTX, H, q, k, v, sm_scale):
-    M = torch.tril(torch.ones((N_CTX, N_CTX), device="cuda"))
-    p = torch.matmul(q, k.transpose(2, 3)) * sm_scale
-    for z in range(Z):
-        for h in range(H):
-            p[:, :, M == 0] = float("-inf")
-    p = torch.softmax(p.float(), dim=-1).half()
-    ref_out = torch.matmul(p, v)
-    return ref_out
+DTYPE = [torch.float16, torch.bfloat16, torch.float32]
 
 
-@pytest.mark.skipif(HAS_TRITON == False, reason="triton is not available")
-@pytest.mark.parametrize('Z, H, N_CTX, D_HEAD', [(3, 4, 2, 16)])
-def test_triton_flash_attention(Z, H, N_CTX, D_HEAD, dtype=torch.float16):
-    torch.manual_seed(20)
-    q = torch.empty((Z, H, N_CTX, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0, std=.5).requires_grad_()
-    k = torch.empty((Z, H, N_CTX, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0, std=.5).requires_grad_()
-    v = torch.empty((Z, H, N_CTX, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0, std=.5).requires_grad_()
-    sm_scale = 0.3
-    dout = torch.randn_like(q)
+def attention_ref(q, k, v, attn_mask=None, causal=False):
+    """
+    attention output of the control group
+    """
+    dtype_og = q.dtype
+    seqlen_q, seqlen_k = q.shape[1], k.shape[1]
+    d = q.shape[-1]
+    scale = 1.0 / math.sqrt(d)
+    scores = torch.einsum("bthd,bshd->bhts", q * scale, k)
 
-    ref_out = baseline_attention(Z, N_CTX, H, q, k, v, sm_scale)
-    ref_out.backward(dout)
-    ref_dv, v.grad = v.grad.clone(), None
-    ref_dk, k.grad = k.grad.clone(), None
-    ref_dq, q.grad = q.grad.clone(), None
+    if attn_mask is not None:
+        scores.masked_fill_(rearrange(~attn_mask, "b s -> b 1 1 s"), float("-inf"))
+    if causal:
+        causal_mask = torch.triu(torch.ones(seqlen_q, seqlen_k, dtype=torch.bool, device=q.device), 1)
+        scores.masked_fill_(causal_mask, float("-inf"))
+    attention = torch.softmax(scores, dim=-1)
 
-    # triton implementation
-    tri_out = triton_flash_attention(q, k, v, sm_scale)
-    tri_out.backward(dout)
-    tri_dv, v.grad = v.grad.clone(), None
-    tri_dk, k.grad = k.grad.clone(), None
-    tri_dq, q.grad = q.grad.clone(), None
-    # compare
-    assert torch.allclose(ref_out, tri_out, atol=1e-3)
-    assert torch.allclose(ref_dv, tri_dv, atol=1e-3)
-    assert torch.allclose(ref_dk, tri_dk, atol=1e-3)
-    assert torch.allclose(ref_dq, tri_dq, atol=1e-3)
+    output = torch.einsum("bhts,bshd->bthd", attention, v)
+    output = rearrange(output, "b s h d -> b s (h d)")
+
+    # Modify the data at the positions of the mask to 0
+    if attn_mask is not None:
+        output.masked_fill_(rearrange(~attn_mask, "b s -> b s 1"), 0.0)
+
+    return output.to(dtype=dtype_og)
 
 
-@pytest.mark.skipif(HAS_FLASH_ATTN == False, reason="flash is not available")
-@pytest.mark.parametrize('Z, H, N_CTX, D_HEAD', [(3, 4, 2, 16)])
-def test_flash_attention(Z, H, N_CTX, D_HEAD, dtype=torch.float16):
-    torch.manual_seed(20)
-    q = torch.randn((Z, H, N_CTX, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0, std=.5).requires_grad_()
-    k = torch.randn((Z, H, N_CTX, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0, std=.5).requires_grad_()
-    v = torch.randn((Z, H, N_CTX, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0, std=.5).requires_grad_()
-    sm_scale = 0.3
-    dout = torch.randn_like(q)
+@pytest.mark.skipif(not HAS_MEM_EFF_ATTN and not HAS_FLASH_ATTN, reason="xformers is not available")
+@clear_cache_before_run()
+@parameterize("proj_shape", [(6, 8, 4, 16)])
+@parameterize("dtype", DTYPE)
+@parameterize("dropout", [0.0])
+def test_attention_gpt(proj_shape, dtype, dropout):
+    (B, S, H, D_HEAD) = proj_shape
+    D = H * D_HEAD
 
-    # reference implementation
-    ref_out = baseline_attention(Z, N_CTX, H, q, k, v, sm_scale)
-    ref_out.backward(dout)
-    ref_dv, v.grad = v.grad.clone(), None
-    ref_dk, k.grad = k.grad.clone(), None
-    ref_dq, q.grad = q.grad.clone(), None
+    q = torch.randn((B, S, H, D_HEAD), dtype=dtype, device="cuda", requires_grad=True)
+    k = torch.randn((B, S, H, D_HEAD), dtype=dtype, device="cuda", requires_grad=True)
+    v = torch.randn((B, S, H, D_HEAD), dtype=dtype, device="cuda", requires_grad=True)
 
-    # flash implementation
-    q, k, v = map(lambda x: rearrange(x, 'z h n d -> (z n) h d'), [q, k, v])
-    dout = rearrange(dout, 'z h n d -> (z n) h d').detach()
-    for i in range(3):
-        if i == 0:
-            tri_out = flash_attention_q_k_v(q, k, v, sm_scale, Z, N_CTX, N_CTX, causal=True)
-        elif i == 1:
-            kv = torch.cat((k.unsqueeze(1), v.unsqueeze(1)), dim=1)
-            tri_out = flash_attention_q_kv(q, kv, sm_scale, Z, N_CTX, N_CTX, causal=True)
-        else:
-            qkv = torch.cat((q.unsqueeze(1), k.unsqueeze(1), v.unsqueeze(1)), dim=1)
-            tri_out = flash_attention_qkv(qkv, sm_scale, Z, N_CTX, causal=True)
+    mask = [torch.ones(S - i, dtype=torch.bool, device="cuda") for i in range(B)]
+    mask = torch.nn.utils.rnn.pad_sequence(mask, batch_first=True)
 
-        tri_out.backward(dout, retain_graph=True)
+    attn = ColoAttention(D, H, dropout=dropout)
+    y = attn(q, k, v, attn_mask=mask, attn_mask_type=AttnMaskType.paddedcausal)
 
-        if i == 0:
-            tri_dq, tri_dk, tri_dv, = torch.autograd.grad(tri_out, (q, k, v), dout)
-            tri_out, tri_dq, tri_dk, tri_dv = map(lambda x: rearrange(x, '(z n) h d -> z h n d', z=Z),
-                                                (tri_out, tri_dq, tri_dk, tri_dv))
-        elif i == 1:
-            tri_dq, tri_dkv, = torch.autograd.grad(tri_out, (q, kv), dout)
-            tri_dk, tri_dv = torch.chunk(tri_dkv, 2, dim=1)
-            tri_out, tri_dq, tri_dk, tri_dv = map(lambda x: rearrange(x, '(z n) h d -> z h n d', z=Z),
-                                                (tri_out, tri_dq, tri_dk.squeeze(1), tri_dv.squeeze(1)))
-        else:
-            tri_dqkv, = torch.autograd.grad(tri_out, (qkv), dout)
-            tri_dq, tri_dk, tri_dv = torch.chunk(tri_dqkv, 3, dim=1)
-            tri_out, tri_dq, tri_dk, tri_dv = map(lambda x: rearrange(x, '(z n) h d -> z h n d', z=Z),
-                                                (tri_out, tri_dq.squeeze(1), tri_dk.squeeze(1), tri_dv.squeeze(1)))
+    assert list(y.shape) == [B, S, D]
 
-        # compare
-        assert torch.allclose(ref_out, tri_out, atol=1e-3)
-        assert torch.allclose(ref_dv, tri_dv, atol=1e-3)
-        assert torch.allclose(ref_dk, tri_dk, atol=1e-3)
-        assert torch.allclose(ref_dq, tri_dq, atol=1e-3)
+    out_ref = attention_ref(q, k, v, mask, causal=True)
+
+    # check gradients
+    dy = torch.rand_like(y)
+    grad_q, grad_k, grad_v = torch.autograd.grad(y, (q, k, v), dy)
+    grad_ref_q, grad_ref_k, grad_ref_v = torch.autograd.grad(out_ref, (q, k, v), dy)
+
+    torch.allclose(y, out_ref, atol=1e-7), f"{(y - out_ref).abs().max()}"
+    torch.allclose(grad_q, grad_ref_q, atol=1e-7), f"{(grad_q - grad_ref_q).abs().max()}"
+    torch.allclose(grad_k, grad_ref_k, atol=1e-7), f"{(grad_k - grad_ref_k).abs().max()}"
+    torch.allclose(grad_v, grad_ref_v, atol=1e-7), f"{(grad_v - grad_ref_v).abs().max()}"
 
 
-if __name__ == '__main__':
-    test_flash_attention(3, 4, 2, 16)
+@pytest.mark.skipif(not HAS_MEM_EFF_ATTN and not HAS_FLASH_ATTN, reason="xformers is not available")
+@clear_cache_before_run()
+@parameterize("proj_shape", [(6, 8, 4, 16)])
+@parameterize("dtype", DTYPE)
+@parameterize("dropout", [0.0])
+def test_attention_bert(proj_shape, dtype, dropout):
+    (B, S, H, D_HEAD) = proj_shape
+    D = H * D_HEAD
+
+    q = torch.randn((B, S, H, D_HEAD), dtype=dtype, device="cuda", requires_grad=True)
+    k = torch.randn((B, S, H, D_HEAD), dtype=dtype, device="cuda", requires_grad=True)
+    v = torch.randn((B, S, H, D_HEAD), dtype=dtype, device="cuda", requires_grad=True)
+
+    # attention mask of shape [B, S] with zero padding to max length S
+    mask = torch.randint(0, 2, (B, S), dtype=torch.bool, device="cuda")
+
+    attn = ColoAttention(D, H, dropout=dropout)
+    y = attn(q, k, v, attn_mask=mask, attn_mask_type=AttnMaskType.padding)
+
+    assert list(y.shape) == [B, S, D]
+
+    out_ref = attention_ref(q, k, v, mask, causal=False)
+
+    dy = torch.rand_like(y)
+    grad_q, grad_k, grad_v = torch.autograd.grad(y, (q, k, v), dy)
+    grad_ref_q, grad_ref_k, grad_ref_v = torch.autograd.grad(out_ref, (q, k, v), dy)
+
+    torch.allclose(y, out_ref, atol=1e-7), f"{(y - out_ref).abs().max()}"
+    torch.allclose(grad_q, grad_ref_q, atol=1e-7), f"{(grad_q - grad_ref_q).abs().max()}"
+    torch.allclose(grad_k, grad_ref_k, atol=1e-7), f"{(grad_k - grad_ref_k).abs().max()}"
+    torch.allclose(grad_v, grad_ref_v, atol=1e-7), f"{(grad_v - grad_ref_v).abs().max()}"
+
+
+@pytest.mark.skipif(not HAS_MEM_EFF_ATTN and not HAS_FLASH_ATTN, reason="xformers is not available")
+@clear_cache_before_run()
+@parameterize("proj_shape", [(6, 8, 4, 16)])
+@parameterize("dtype", DTYPE)
+@parameterize("dropout", [0.0])
+def test_attention_no_mask(proj_shape, dtype, dropout):
+    (B, S, H, D_HEAD) = proj_shape
+    D = H * D_HEAD
+
+    q = torch.randn((B, S, H, D_HEAD), dtype=dtype, device="cuda", requires_grad=True)
+    k = torch.randn((B, S, H, D_HEAD), dtype=dtype, device="cuda", requires_grad=True)
+    v = torch.randn((B, S, H, D_HEAD), dtype=dtype, device="cuda", requires_grad=True)
+
+    attn = ColoAttention(D, H, dropout=dropout)
+    y = attn(q, k, v)
+
+    assert list(y.shape) == [B, S, D]
+
+    out_ref = attention_ref(q, k, v, None, causal=False)
+
+    dy = torch.rand_like(y)
+    grad_q, grad_k, grad_v = torch.autograd.grad(y, (q, k, v), dy)
+    grad_ref_q, grad_ref_k, grad_ref_v = torch.autograd.grad(out_ref, (q, k, v), dy)
+
+    torch.allclose(y, out_ref, atol=1e-7), f"{(y - out_ref).abs().max()}"
+    torch.allclose(grad_q, grad_ref_q, atol=1e-7), f"{(grad_q - grad_ref_q).abs().max()}"
+    torch.allclose(grad_k, grad_ref_k, atol=1e-7), f"{(grad_k - grad_ref_k).abs().max()}"
+    torch.allclose(grad_v, grad_ref_v, atol=1e-7), f"{(grad_v - grad_ref_v).abs().max()}"
+
+
+@pytest.mark.skipif(not HAS_MEM_EFF_ATTN and not HAS_FLASH_ATTN, reason="xformers is not available")
+@clear_cache_before_run()
+@parameterize("proj_shape", [(6, 24, 8, 4, 16)])
+@parameterize("dtype", DTYPE)
+@parameterize("dropout", [0.0])
+def test_cross_attention(proj_shape, dtype, dropout):
+    (B, S, T, H, D_HEAD) = proj_shape
+    D = H * D_HEAD
+
+    q = torch.randn((B, T, H, D_HEAD), dtype=dtype, device="cuda", requires_grad=True)
+    k = torch.randn((B, S, H, D_HEAD), dtype=dtype, device="cuda", requires_grad=True)
+    v = torch.randn((B, S, H, D_HEAD), dtype=dtype, device="cuda", requires_grad=True)
+
+    attn = ColoAttention(D, H, dropout=dropout)
+    y = attn(q, k, v, attn_mask_type=AttnMaskType.causal)
+
+    assert list(y.shape) == [B, T, D]
+
+    out_ref = attention_ref(q, k, v, None, causal=True)
+
+    dy = torch.rand_like(y)
+    grad_q, grad_k, grad_v = torch.autograd.grad(y, (q, k, v), dy)
+    grad_ref_q, grad_ref_k, grad_ref_v = torch.autograd.grad(out_ref, (q, k, v), dy)
+
+    torch.allclose(y, out_ref, atol=1e-18), f"{(y - out_ref).abs().max()}"
+    torch.allclose(grad_q, grad_ref_q, atol=1e-7), f"{(grad_q - grad_ref_q).abs().max()}"
+    torch.allclose(grad_k, grad_ref_k, atol=1e-7), f"{(grad_k - grad_ref_k).abs().max()}"
+    torch.allclose(grad_v, grad_ref_v, atol=1e-7), f"{(grad_v - grad_ref_v).abs().max()}"

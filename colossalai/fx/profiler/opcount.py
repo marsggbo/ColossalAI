@@ -7,6 +7,7 @@ from numbers import Number
 from typing import Any, Callable, List
 
 import torch
+from packaging import version
 
 aten = torch.ops.aten
 
@@ -19,7 +20,28 @@ def matmul_flop_jit(inputs: List[Any], outputs: List[Any]) -> Number:
     # Inputs contains the shapes of two matrices.
     input_shapes = [v.shape for v in inputs]
     assert len(input_shapes) == 2, input_shapes
-    assert input_shapes[0][-1] == input_shapes[1][-2], input_shapes
+
+    # There are three cases: 1) gemm, 2) gemv, 3) dot
+    if all(len(shape) == 2 for shape in input_shapes):
+        # gemm
+        assert input_shapes[0][-1] == input_shapes[1][-2], input_shapes
+    elif all(len(shape) == 1 for shape in input_shapes):
+        # dot
+        assert input_shapes[0][0] == input_shapes[1][0], input_shapes
+
+        # expand shape
+        input_shapes[0] = torch.Size([1, input_shapes[0][0]])
+        input_shapes[1] = torch.Size([input_shapes[1][0], 1])
+    else:
+        # gemv
+        if len(input_shapes[0]) == 1:
+            assert input_shapes[0][0] == input_shapes[1][-2], input_shapes
+            input_shapes.reverse()
+        else:
+            assert input_shapes[1][0] == input_shapes[0][-1], input_shapes
+
+        # expand the shape of the vector to [batch size, 1]
+        input_shapes[-1] = torch.Size([input_shapes[-1][-1], 1])
     flops = reduce(operator.mul, input_shapes[0]) * input_shapes[-1][-1]
     return flops
 
@@ -65,6 +87,19 @@ def bmm_flop_jit(inputs: List[Any], outputs: List[Any]) -> Number:
     input_shapes = [v.shape for v in inputs]
     n, c, t = input_shapes[0]
     d = input_shapes[-1][-1]
+    flops = n * c * t * d
+    return flops
+
+
+def baddbmm_flop_jit(inputs: List[Any], outputs: List[Any]) -> Number:
+    """
+    Count flops for the baddbmm(batch add and batch matmul) operation.
+    """
+    # Inputs = [input, batch1, batch2]
+    # out = input + batch1 x batch2
+    assert len(inputs) == 3, len(inputs)
+    n, c, t = inputs[1].shape
+    d = inputs[2].shape[-1]
     flops = n * c * t * d
     return flops
 
@@ -138,8 +173,11 @@ def norm_flop_counter(affine_arg_index: int, input_arg_index: int) -> Callable:
         # Inputs[0] contains the shape of the input.
         input_shape = inputs[input_arg_index].shape
 
-        has_affine = inputs[affine_arg_index].shape is not None if hasattr(inputs[affine_arg_index],
-                                                                           'shape') else inputs[affine_arg_index]
+        has_affine = (
+            inputs[affine_arg_index].shape is not None
+            if hasattr(inputs[affine_arg_index], "shape")
+            else inputs[affine_arg_index]
+        )
         assert 2 <= len(input_shape) <= 5, input_shape
         # 5 is just a rough estimate
         flop = reduce(operator.mul, input_shape) * (5 if has_affine else 4)
@@ -153,7 +191,7 @@ def batchnorm_flop_jit(inputs: List[Any], outputs: List[Any], training: bool = N
         training = inputs[-3]
     assert isinstance(training, bool), "Signature of aten::batch_norm has changed!"
     if training:
-        return norm_flop_counter(1, 0)(inputs, outputs)    # pyre-ignore
+        return norm_flop_counter(1, 0)(inputs, outputs)  # pyre-ignore
     has_affine = inputs[1].shape is not None
     input_shape = reduce(operator.mul, inputs[0].shape)
     return input_shape * (2 if has_affine else 1)
@@ -183,136 +221,153 @@ def elementwise_flop_counter(input_scale: float = 1, output_scale: float = 0) ->
 
 def zero_flop_jit(*args):
     """
-        Count flops for zero flop layers.
+    Count flops for zero flop layers.
     """
     return 0
 
 
-flop_mapping = {
-    # gemm
-    aten.mm.default: matmul_flop_jit,
-    aten.matmul.default: matmul_flop_jit,
-    aten.addmm.default: addmm_flop_jit,
-    aten.bmm.default: bmm_flop_jit,
+if version.parse(torch.__version__) >= version.parse("1.12.0") and version.parse(torch.__version__) < version.parse(
+    "2.0.0"
+):
+    flop_mapping = {
+        # gemm, gemv and dot
+        aten.mm.default: matmul_flop_jit,
+        aten.mv.default: matmul_flop_jit,
+        aten.dot.default: matmul_flop_jit,
+        aten.matmul.default: matmul_flop_jit,
+        aten.addmm.default: addmm_flop_jit,
+        aten.bmm.default: bmm_flop_jit,
+        aten.baddbmm.default: baddbmm_flop_jit,
+        # convolution
+        aten.convolution.default: conv_flop_jit,
+        aten._convolution.default: conv_flop_jit,
+        aten.convolution_backward.default: conv_backward_flop_jit,
+        # normalization
+        aten.native_batch_norm.default: batchnorm_flop_jit,
+        aten.native_batch_norm_backward.default: batchnorm_flop_jit,
+        aten.cudnn_batch_norm.default: batchnorm_flop_jit,
+        aten.cudnn_batch_norm_backward.default: partial(batchnorm_flop_jit, training=True),
+        aten.native_layer_norm.default: norm_flop_counter(2, 0),
+        aten.native_layer_norm_backward.default: norm_flop_counter(2, 0),
+        aten.native_group_norm.default: norm_flop_counter(2, 0),
+        aten.native_group_norm_backward.default: norm_flop_counter(2, 0),
+        # pooling
+        aten.avg_pool1d.default: elementwise_flop_counter(1, 0),
+        aten.avg_pool2d.default: elementwise_flop_counter(1, 0),
+        aten.avg_pool2d_backward.default: elementwise_flop_counter(0, 1),
+        aten.avg_pool3d.default: elementwise_flop_counter(1, 0),
+        aten.avg_pool3d_backward.default: elementwise_flop_counter(0, 1),
+        aten.max_pool1d.default: elementwise_flop_counter(1, 0),
+        aten.max_pool2d.default: elementwise_flop_counter(1, 0),
+        aten.max_pool3d.default: elementwise_flop_counter(1, 0),
+        aten.max_pool1d_with_indices.default: elementwise_flop_counter(1, 0),
+        aten.max_pool2d_with_indices.default: elementwise_flop_counter(1, 0),
+        aten.max_pool2d_with_indices_backward.default: elementwise_flop_counter(0, 1),
+        aten.max_pool3d_with_indices.default: elementwise_flop_counter(1, 0),
+        aten.max_pool3d_with_indices_backward.default: elementwise_flop_counter(0, 1),
+        aten._adaptive_avg_pool2d.default: elementwise_flop_counter(1, 0),
+        aten._adaptive_avg_pool2d_backward.default: elementwise_flop_counter(0, 1),
+        aten._adaptive_avg_pool3d.default: elementwise_flop_counter(1, 0),
+        aten._adaptive_avg_pool3d_backward.default: elementwise_flop_counter(0, 1),
+        aten.embedding_dense_backward.default: elementwise_flop_counter(0, 1),
+        aten.embedding.default: elementwise_flop_counter(1, 0),
+        aten.upsample_nearest2d.vec: elementwise_flop_counter(0, 1),
+        aten.upsample_nearest2d_backward.vec: elementwise_flop_counter(0, 1),
+    }
 
-    # convolution
-    aten.convolution.default: conv_flop_jit,
-    aten._convolution.default: conv_flop_jit,
-    aten.convolution_backward.default: conv_backward_flop_jit,
+    elementwise_flop_aten = [
+        # basic op
+        aten.add.Tensor,
+        aten.add_.Tensor,
+        aten.div.Tensor,
+        aten.div_.Tensor,
+        aten.div.Scalar,
+        aten.div_.Scalar,
+        aten.mul.Tensor,
+        aten.mul.Scalar,
+        aten.mul_.Tensor,
+        aten.neg.default,
+        aten.pow.Tensor_Scalar,
+        aten.rsub.Scalar,
+        aten.sum.default,
+        aten.sum.dim_IntList,
+        aten.mean.dim,
+        aten.sub.Tensor,
+        aten.sub_.Tensor,
+        aten.exp.default,
+        aten.sin.default,
+        aten.cos.default,
+        # activation op
+        aten.hardswish.default,
+        aten.hardswish_.default,
+        aten.hardswish_backward.default,
+        aten.hardtanh.default,
+        aten.hardtanh_.default,
+        aten.hardtanh_backward.default,
+        aten.hardsigmoid_backward.default,
+        aten.hardsigmoid.default,
+        aten.gelu.default,
+        aten.gelu_backward.default,
+        aten.silu.default,
+        aten.silu_.default,
+        aten.silu_backward.default,
+        aten.sigmoid.default,
+        aten.sigmoid_backward.default,
+        aten._softmax.default,
+        aten._softmax_backward_data.default,
+        aten.relu_.default,
+        aten.relu.default,
+        aten.tanh.default,
+        aten.tanh_backward.default,
+        aten.threshold_backward.default,
+        # dropout
+        aten.native_dropout.default,
+        aten.native_dropout_backward.default,
+    ]
+    for op in elementwise_flop_aten:
+        flop_mapping[op] = elementwise_flop_counter(1, 0)
 
-    # normalization
-    aten.native_batch_norm.default: batchnorm_flop_jit,
-    aten.native_batch_norm_backward.default: batchnorm_flop_jit,
-    aten.cudnn_batch_norm.default: batchnorm_flop_jit,
-    aten.cudnn_batch_norm_backward.default: partial(batchnorm_flop_jit, training=True),
-    aten.native_layer_norm.default: norm_flop_counter(2, 0),
-    aten.native_layer_norm_backward.default: norm_flop_counter(2, 0),
+    # TODO: this will be removed in future
+    zero_flop_aten = [
+        aten.as_strided.default,
+        aten.as_strided_.default,
+        aten.bernoulli_.float,
+        aten.cat.default,
+        aten.clone.default,
+        aten.copy_.default,
+        aten.detach.default,
+        aten.expand.default,
+        aten.empty_like.default,
+        aten.new_empty.default,
+        aten.new_empty_strided.default,
+        aten.ones_like.default,
+        aten._reshape_alias.default,
+        aten.select.int,
+        aten.select_backward.default,
+        aten.squeeze.dim,
+        aten.slice.Tensor,
+        aten.slice_backward.default,
+        aten.stack.default,
+        aten.split.Tensor,
+        aten.permute.default,
+        aten.t.default,
+        aten.transpose.int,
+        aten._to_copy.default,
+        aten.unsqueeze.default,
+        aten.unbind.int,
+        aten._unsafe_view.default,
+        aten.view.default,
+        aten.where.self,
+        aten.zero_.default,
+        aten.zeros_like.default,
+        aten.fill_.Scalar,
+        aten.stack.default,
+    ]  # yapf: disable
 
-    # pooling
-    aten.avg_pool1d.default: elementwise_flop_counter(1, 0),
-    aten.avg_pool2d.default: elementwise_flop_counter(1, 0),
-    aten.avg_pool2d_backward.default: elementwise_flop_counter(0, 1),
-    aten.avg_pool3d.default: elementwise_flop_counter(1, 0),
-    aten.avg_pool3d_backward.default: elementwise_flop_counter(0, 1),
-    aten.max_pool1d.default: elementwise_flop_counter(1, 0),
-    aten.max_pool2d.default: elementwise_flop_counter(1, 0),
-    aten.max_pool3d.default: elementwise_flop_counter(1, 0),
-    aten.max_pool1d_with_indices.default: elementwise_flop_counter(1, 0),
-    aten.max_pool2d_with_indices.default: elementwise_flop_counter(1, 0),
-    aten.max_pool2d_with_indices_backward.default: elementwise_flop_counter(0, 1),
-    aten.max_pool3d_with_indices.default: elementwise_flop_counter(1, 0),
-    aten.max_pool3d_with_indices_backward.default: elementwise_flop_counter(0, 1),
-    aten._adaptive_avg_pool2d.default: elementwise_flop_counter(1, 0),
-    aten._adaptive_avg_pool2d_backward.default: elementwise_flop_counter(0, 1),
-    aten._adaptive_avg_pool3d.default: elementwise_flop_counter(1, 0),
-    aten._adaptive_avg_pool3d_backward.default: elementwise_flop_counter(0, 1),
-    aten.embedding_dense_backward.default: elementwise_flop_counter(0, 1),
-    aten.embedding.default: elementwise_flop_counter(1, 0),
-}
+    for op in zero_flop_aten:
+        flop_mapping[op] = zero_flop_jit
 
-elementwise_flop_aten = [
-    # basic op
-    aten.add.Tensor,
-    aten.add_.Tensor,
-    aten.div.Tensor,
-    aten.div_.Tensor,
-    aten.div.Scalar,
-    aten.div_.Scalar,
-    aten.mul.Tensor,
-    aten.mul.Scalar,
-    aten.mul_.Tensor,
-    aten.neg.default,
-    aten.pow.Tensor_Scalar,
-    aten.rsub.Scalar,
-    aten.sum.default,
-    aten.sum.dim_IntList,
-    aten.mean.dim,
-
-    # activation op
-    aten.hardswish.default,
-    aten.hardswish_.default,
-    aten.hardswish_backward.default,
-    aten.hardtanh.default,
-    aten.hardtanh_.default,
-    aten.hardtanh_backward.default,
-    aten.hardsigmoid_backward.default,
-    aten.hardsigmoid.default,
-    aten.gelu.default,
-    aten.gelu_backward.default,
-    aten.silu.default,
-    aten.silu_.default,
-    aten.silu_backward.default,
-    aten.sigmoid.default,
-    aten.sigmoid_backward.default,
-    aten._softmax.default,
-    aten._softmax_backward_data.default,
-    aten.relu_.default,
-    aten.relu.default,
-    aten.tanh.default,
-    aten.tanh_backward.default,
-    aten.threshold_backward.default,
-
-    # dropout
-    aten.native_dropout.default,
-    aten.native_dropout_backward.default,
-]
-
-for op in elementwise_flop_aten:
-    flop_mapping[op] = elementwise_flop_counter(1, 0)
-
-# TODO: this will be removed in future
-zero_flop_aten = [
-    aten.as_strided.default,
-    aten.as_strided_.default,
-    aten.bernoulli_.float,
-    aten.cat.default,
-    aten.clone.default,
-    aten.copy_.default,
-    aten.detach.default,
-    aten.expand.default,
-    aten.empty_like.default,
-    aten.new_empty.default,
-    aten.new_empty_strided.default,
-    aten.ones_like.default,
-    aten._reshape_alias.default,
-    aten.select.int,
-    aten.select_backward.default,
-    aten.squeeze.dim,
-    aten.slice.Tensor,
-    aten.slice_backward.default,
-    aten.split.Tensor,
-    aten.permute.default,
-    aten.t.default,
-    aten.transpose.int,
-    aten._to_copy.default,
-    aten.unsqueeze.default,
-    aten.unbind.int,
-    aten._unsafe_view.default,
-    aten.view.default,
-    aten.where.self,
-    aten.zero_.default,
-    aten.zeros_like.default,
-]
-
-for op in zero_flop_aten:
-    flop_mapping[op] = zero_flop_jit
+else:
+    flop_mapping = {}
+    elementwise_flop_aten = {}
+    zero_flop_aten = {}

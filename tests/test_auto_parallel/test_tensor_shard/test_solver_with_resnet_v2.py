@@ -2,27 +2,31 @@ import torch
 from torch.fx import GraphModule
 from torchvision.models import resnet50
 
+from colossalai._analyzer.fx.passes import shape_prop_pass
+
+# from colossalai.fx.tracer.tracer import ColoTracer
+from colossalai._analyzer.fx.tracer.tracer import ColoTracer
 from colossalai.auto_parallel.tensor_shard.constants import BATCHNORM_MODULE_OP
-from colossalai.auto_parallel.tensor_shard.solver import (CostGraph, GraphAnalyser, Solver, SolverOptions,
-                                                          StrategiesConstructor)
+from colossalai.auto_parallel.tensor_shard.options import SolverOptions
+from colossalai.auto_parallel.tensor_shard.solver import CostGraph, Solver, StrategiesConstructor
 from colossalai.device.device_mesh import DeviceMesh
-from colossalai.fx.tracer.tracer import ColoTracer
 from colossalai.tensor.shape_consistency import ShapeConsistencyManager
-from colossalai.testing.pytest_wrapper import run_on_environment_flag
+from colossalai.testing import clear_cache_before_run, run_on_environment_flag
 
 
-@run_on_environment_flag(name='AUTO_PARALLEL')
+@run_on_environment_flag(name="AUTO_PARALLEL")
+@clear_cache_before_run()
 def test_cost_graph():
     physical_mesh_id = torch.arange(0, 8)
     mesh_shape = (2, 4)
     # [[0, 1]
     #  [2, 3]]
     device_mesh = DeviceMesh(physical_mesh_id, mesh_shape)
-    shape_consistency_manager = ShapeConsistencyManager()
+    ShapeConsistencyManager()
 
-    tracer = ColoTracer()
+    tracer = ColoTracer(bias_addition_split=True)
     model = resnet50(num_classes=100000)
-    input_sample = {'x': torch.rand(128, 3, 224, 224).to('meta')}
+    input_sample = {"x": torch.rand(128, 3, 224, 224).to("meta")}
 
     graph = tracer.trace(root=model, meta_args=input_sample)
     # graph():
@@ -50,16 +54,16 @@ def test_cost_graph():
     #     %fc : [#users=1] = call_module[target=fc](args = (%flatten,), kwargs = {})
     #     return fc
     gm = GraphModule(model, graph, model.__class__.__name__)
+    shape_prop_pass(gm, *input_sample.values())
     gm.recompile()
-    graph_analyser = GraphAnalyser(gm)
-    liveness_list = graph_analyser.liveness_analysis()
-    solver_options = SolverOptions(fast=True)
+
+    solver_options = SolverOptions()
     strategies_constructor = StrategiesConstructor(graph, device_mesh, solver_options)
     strategies_constructor.build_strategies_and_cost()
 
     cost_graph = CostGraph(strategies_constructor.leaf_strategies)
     cost_graph.simplify_graph()
-    solver = Solver(gm.graph, strategies_constructor, cost_graph, graph_analyser)
+    solver = Solver(gm.graph, strategies_constructor, cost_graph)
 
     ret = solver.call_solver_serialized_args()
     print(ret[0])
@@ -71,7 +75,7 @@ def test_cost_graph():
     communication_cost_bn = 0
     memory_cost = 0
     for index, node in enumerate(graph.nodes):
-        if node.op == 'call_module':
+        if node.op == "call_module":
             submod = node.graph.owning_module.get_submodule(node.target)
             if type(submod) in BATCHNORM_MODULE_OP:
                 communication_cost_bn += node.strategies_vector[strategies_list[index]].communication_cost.total
@@ -83,11 +87,11 @@ def test_cost_graph():
             node_memory_cost = node_memory_cost[0]
         memory_cost += node_memory_cost.activation + node_memory_cost.parameter
 
-    print(f'computation cost is {computation_cost}')
-    print(f'communication cost is {communication_cost}')
-    print(f'memory cost is {memory_cost}')
-    print(f'bn communication cost is {communication_cost_bn}')
+    print(f"computation cost is {computation_cost}")
+    print(f"communication cost is {communication_cost}")
+    print(f"memory cost is {memory_cost}")
+    print(f"bn communication cost is {communication_cost_bn}")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     test_cost_graph()

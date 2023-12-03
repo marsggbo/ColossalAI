@@ -1,9 +1,10 @@
-import torch
+import math
 import os
 import tempfile
-import math
+from typing import Callable, Dict, List, Optional
+
+import torch
 from torch.nn.parameter import Parameter
-from typing import Optional, List, Dict, Callable
 
 
 class NVMeOptimizer(torch.optim.Optimizer):
@@ -18,13 +19,11 @@ class NVMeOptimizer(torch.optim.Optimizer):
 
     Raises:
         ImportError: Raise if ``tensornvme`` is not installed.
-        """
+    """
 
-    def __init__(self,
-                 params,
-                 defaults: dict,
-                 nvme_offload_fraction: float = 0.0,
-                 offload_dir: Optional[str] = None) -> None:
+    def __init__(
+        self, params, defaults: dict, nvme_offload_fraction: float = 0.0, offload_dir: Optional[str] = None
+    ) -> None:
         assert 0.0 <= nvme_offload_fraction <= 1.0
         super().__init__(params, defaults)
         self.nvme_offload_fraction = float(nvme_offload_fraction)
@@ -33,17 +32,18 @@ class NVMeOptimizer(torch.optim.Optimizer):
                 from tensornvme import DiskOffloader
                 from tensornvme._C import get_backends
             except ModuleNotFoundError:
-                raise ModuleNotFoundError('Please install tensornvme to use NVMeOptimizer')
+                raise ModuleNotFoundError("Please install tensornvme to use NVMeOptimizer")
             self.offload_dir = offload_dir or tempfile.mkdtemp()
-            backend = 'uring' if 'uring' in get_backends() else 'aio'
+            backend = "uring" if "uring" in get_backends() else "aio"
             self.offloader = DiskOffloader(self.offload_dir, 8, backend=backend)
         else:
             self.offload_dir = None
             self.offloader = None
         self.is_on_nvme: Dict[Parameter, bool] = {}
         self.offloaded_numel: int = 0
-        self.total_numel: int = self._get_numel()
-        self.can_offload_numel = math.floor(self.total_numel * self.nvme_offload_fraction)
+        # As param may be not materialized here, these attributes are initialized when the first step
+        self.total_numel: Optional[int] = None
+        self.can_offload_numel: Optional[int] = None
 
         self.prefetch_params: List[Parameter] = []
         self.param_to_prefetch_idx: Dict[Parameter, int] = {}
@@ -51,13 +51,17 @@ class NVMeOptimizer(torch.optim.Optimizer):
     def _get_numel(self) -> int:
         numel = 0
         for group in self.param_groups:
-            for p in group['params']:
+            for p in group["params"]:
                 numel += p.storage().size()
         return numel
 
     def _post_state_init(self, param: Parameter) -> None:
         numel = param.storage().size()
-        if self.offloader is not None and param.device.type == 'cpu' and numel + self.offloaded_numel <= self.can_offload_numel:
+        if (
+            self.offloader is not None
+            and param.device.type == "cpu"
+            and numel + self.offloaded_numel <= self.can_offload_numel
+        ):
             self.is_on_nvme[param] = True
             self.offloaded_numel += numel
         else:
@@ -68,15 +72,18 @@ class NVMeOptimizer(torch.optim.Optimizer):
             return
         assert len(self.prefetch_params) == 0 and len(self.param_to_prefetch_idx) == 0
         for group in self.param_groups:
-            for p in group['params']:
+            for p in group["params"]:
                 if p.grad is None:
                     continue
                 if len(self.state[p]) > 0 and self.is_on_nvme[p]:
-                    assert p.device.type == 'cpu'
+                    assert p.device.type == "cpu"
                     self.param_to_prefetch_idx[p] = len(self.prefetch_params)
                     self.prefetch_params.append(p)
 
     def _pre_step(self, *state_keys: str) -> None:
+        if self.total_numel is None:
+            self.total_numel = self._get_numel()
+            self.can_offload_numel = math.floor(self.total_numel * self.nvme_offload_fraction)
         self._setup_prefetch_params()
         if self.offloader is None or len(self.prefetch_params) == 0:
             return
@@ -151,7 +158,7 @@ class NVMeOptimizer(torch.optim.Optimizer):
         super().load_state_dict(state_dict)
 
     def __del__(self) -> None:
-        if getattr(self, 'offloader', None) is not None:
+        if getattr(self, "offloader", None) is not None:
             del self.offloader
             if os.path.exists(self.offload_dir):
                 try:

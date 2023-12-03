@@ -1,13 +1,11 @@
-import colossalai
-import colossalai.nn as col_nn
-import pytest
 import torch
-import torch.nn as nn
+from torch.fx import symbolic_trace
+
 from colossalai.fx._compatibility import is_compatible_with_meta
-from colossalai.fx.passes.adding_split_node_pass import (split_with_split_nodes_pass, uniform_split_pass)
+from colossalai.fx.passes.adding_split_node_pass import split_with_split_nodes_pass, uniform_split_pass
 from colossalai.fx.passes.meta_info_prop import MetaInfoProp
 from colossalai.fx.passes.utils import get_comm_size
-from torch.fx import symbolic_trace
+from colossalai.testing import clear_cache_before_run
 
 is_compatible = is_compatible_with_meta()
 if is_compatible:
@@ -19,7 +17,6 @@ PIPELINE_SIZE = 2
 
 
 class MLP(torch.nn.Module):
-
     def __init__(self, dim: int):
         super().__init__()
         self.linear1 = torch.nn.Linear(dim, dim)
@@ -35,9 +32,10 @@ class MLP(torch.nn.Module):
         return x
 
 
+@clear_cache_before_run()
 def test_comm_size_compute():
     model = MLP(MODEL_DIM)
-    input_sample = torch.rand(BATCH_SIZE, MODEL_DIM, device='meta')
+    input_sample = torch.rand(BATCH_SIZE, MODEL_DIM, device="meta")
     gm = symbolic_trace(model)
     if is_compatible:
         input_sample = MetaTensor(input_sample, fake_device=next(gm.parameters()).device)
@@ -50,5 +48,5 @@ def test_comm_size_compute():
     assert comm_size == 128
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     test_comm_size_compute()

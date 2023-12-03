@@ -1,13 +1,13 @@
 import torch
 import torch.nn as nn
+from torch.fx import GraphModule
+
 from colossalai.fx.proxy import ColoProxy
 from colossalai.fx.tracer.tracer import ColoTracer
-from torch.fx import GraphModule
-import pytest
+from colossalai.testing import clear_cache_before_run
 
 
 class Conv1D(nn.Module):
-
     def __init__(self, nf, nx):
         super().__init__()
         self.nf = nf
@@ -23,11 +23,11 @@ class Conv1D(nn.Module):
         return x
 
 
+@clear_cache_before_run()
 def test_coloproxy():
-
     tracer = ColoTracer()
     model = Conv1D(3, 3)
-    input_sample = {'x': torch.rand(3, 3).to('meta')}
+    input_sample = {"x": torch.rand(3, 3).to("meta")}
 
     graph = tracer.trace(root=model, meta_args=input_sample)
     gm = GraphModule(model, graph, model.__class__.__name__)
@@ -35,7 +35,7 @@ def test_coloproxy():
     node = list(gm.graph.nodes)[0]
 
     proxy = ColoProxy(node=node, tracer=tracer)
-    proxy.meta_data = torch.empty(4, 2, device='meta')
+    proxy.meta_data = torch.empty(4, 2, device="meta")
 
     assert len(proxy) == 4
     assert proxy.shape[0] == 4 and proxy.shape[1] == 2
@@ -44,5 +44,5 @@ def test_coloproxy():
     assert proxy.size(0) == 4
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     test_coloproxy()

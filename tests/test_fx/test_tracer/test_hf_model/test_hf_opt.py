@@ -1,30 +1,20 @@
 import pytest
 import torch
-import transformers
 from hf_tracer_utils import trace_model_and_compare_output
+from packaging import version
 
-BATCH_SIZE = 1
-SEQ_LENGTH = 16
+from colossalai.testing import clear_cache_before_run
+from tests.kit.model_zoo import model_zoo
 
 
+@pytest.mark.skipif(version.parse(torch.__version__) < version.parse("1.12.0"), reason="torch version < 12")
+@clear_cache_before_run()
 def test_opt():
-    MODEL_LIST = [
-        transformers.OPTModel,
-        transformers.OPTForCausalLM,
-    ]
-
-    config = transformers.OPTConfig(hidden_size=128, num_hidden_layers=2, num_attention_heads=4)
-
-    def data_gen():
-        input_ids = torch.zeros((BATCH_SIZE, SEQ_LENGTH), dtype=torch.int64)
-        attention_mask = torch.zeros((BATCH_SIZE, SEQ_LENGTH), dtype=torch.int64)
-        kwargs = dict(input_ids=input_ids, attention_mask=attention_mask)
-        return kwargs
-
-    for model_cls in MODEL_LIST:
-        model = model_cls(config=config)
-        trace_model_and_compare_output(model, data_gen)
+    sub_registry = model_zoo.get_sub_registry("transformers_opt")
+    for name, (model_fn, data_gen_fn, _, _, _) in sub_registry.items():
+        model = model_fn()
+        trace_model_and_compare_output(model, data_gen_fn, ignore_data=["labels", "start_positions", "end_positions"])
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     test_opt()

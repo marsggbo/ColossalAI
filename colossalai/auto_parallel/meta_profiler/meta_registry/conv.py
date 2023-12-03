@@ -1,28 +1,23 @@
-from typing import Callable, Dict, List, Tuple, Union
+from typing import List, Tuple
 
 import torch
 
-from colossalai.auto_parallel.tensor_shard.sharding_strategy import (
-    MemoryCost,
-    OperationData,
-    OperationDataType,
-    ShardingStrategy,
-    StrategiesVector,
-    TrainCycleItem,
-)
-from colossalai.fx.profiler.memory_utils import activation_size
-from colossalai.fx.profiler.opcount import flop_mapping
-from colossalai.tensor.sharding_spec import ShardingSpec
+from colossalai._analyzer._subclasses.flop_tensor import flop_mapping
+from colossalai._analyzer.fx.node_util import compute_size_in_bytes
+from colossalai.auto_parallel.tensor_shard.sharding_strategy import MemoryCost, OperationDataType, TrainCycleItem
 
 from ..registry import meta_register
 
-__all__ = ['convnd_meta_info']
+__all__ = ["convnd_meta_info"]
 
 
 @meta_register.register(torch.nn.Conv1d)
 @meta_register.register(torch.nn.Conv2d)
 @meta_register.register(torch.nn.Conv3d)
-def convnd_meta_info(*args) -> Tuple[TrainCycleItem, TrainCycleItem, List[torch.Tensor]]:
+@meta_register.register(torch.nn.functional.conv1d)
+@meta_register.register(torch.nn.functional.conv2d)
+@meta_register.register(torch.nn.functional.conv3d)
+def convnd_meta_info(*args, **kwargs) -> Tuple[TrainCycleItem, TrainCycleItem, List[torch.Tensor]]:
     """torch.nn.Conv1d, torch.nn.Conv2d, torch.nn.Conv3d meta info generator
     The atens graph of torch.nn.Convnd with bias is
     graph():
@@ -55,14 +50,24 @@ def convnd_meta_info(*args) -> Tuple[TrainCycleItem, TrainCycleItem, List[torch.
     """
 
     has_bias: bool = False
-    input_tensor = next(filter(lambda x: x.type == OperationDataType.ARG, args)).data
+    input_tensor = args[0].data
     output_tensor = next(filter(lambda x: x.type == OperationDataType.OUTPUT, args)).data
-    weight_tensor = next(filter(lambda x: x.name == 'weight', args)).data
+    if len(args) == 4:
+        weight_tensors = [args[1].data, args[3].data]
+    else:
+        weight_tensors = [args[1].data]
 
     # check if conv has bias
-    if len(args) == 4:
-        bias_tensor = next(filter(lambda x: x.name == 'bias', args)).data
+    if len(weight_tensors) > 1:
         has_bias = True
+        # bias tensor's shape only has one dimension
+        if len(weight_tensors[0].shape) == 1:
+            bias_tensor, weight_tensor = weight_tensors
+        else:
+            weight_tensor, bias_tensor = weight_tensors
+
+    else:
+        weight_tensor = weight_tensors[0]
 
     # construct input args for forward
     fwd_args = [None] * 9
@@ -90,33 +95,47 @@ def convnd_meta_info(*args) -> Tuple[TrainCycleItem, TrainCycleItem, List[torch.
 
     # calculate compute cost
     fwd_compute_cost = flop_mapping[torch.ops.aten.convolution.default](fwd_args, (output_tensor,))
-    bwd_compute_cost = flop_mapping[torch.ops.aten.convolution_backward.default](bwd_args, (input_tensor, weight_tensor, bias_tensor)) if has_bias else \
-                       flop_mapping[torch.ops.aten.convolution_backward.default](bwd_args, (input_tensor, weight_tensor))
+    bwd_compute_cost = (
+        flop_mapping[torch.ops.aten.convolution_backward.default](bwd_args, (input_tensor, weight_tensor, bias_tensor))
+        if has_bias
+        else flop_mapping[torch.ops.aten.convolution_backward.default](bwd_args, (input_tensor, weight_tensor))
+    )
     compute_cost = TrainCycleItem(fwd=fwd_compute_cost, bwd=bwd_compute_cost, total=fwd_compute_cost + bwd_compute_cost)
 
     # calculate memory cost
     # TODO: use profiler to check conv temp memory
-    fwd_memory_cost = MemoryCost(activation=activation_size(output_tensor),
-                                 parameter=activation_size(weight_tensor) +
-                                 activation_size(bias_tensor) if has_bias else activation_size(weight_tensor),
-                                 temp=0,
-                                 buffer=0)
+    # NOTE: currently in SPMD solver we always believe that there will be a new tensor created in forward
+    fwd_memory_cost = MemoryCost(
+        activation=compute_size_in_bytes([input_tensor, output_tensor]),
+        parameter=compute_size_in_bytes([weight_tensor, bias_tensor])
+        if has_bias
+        else compute_size_in_bytes(weight_tensor),
+        temp=0,
+        buffer=0,
+    )
 
-    bwd_memory_cost = MemoryCost(activation=activation_size(input_tensor) + activation_size(weight_tensor) +
-                                 activation_size(bias_tensor) if has_bias else activation_size(input_tensor) +
-                                 activation_size(weight_tensor),
-                                 parameter=activation_size(weight_tensor) +
-                                 activation_size(bias_tensor) if has_bias else activation_size(weight_tensor),
-                                 temp=0,
-                                 buffer=0)
+    bwd_memory_cost = MemoryCost(
+        activation=compute_size_in_bytes([input_tensor, weight_tensor, bias_tensor])
+        if has_bias
+        else compute_size_in_bytes([input_tensor, weight_tensor]),
+        parameter=compute_size_in_bytes([weight_tensor, bias_tensor])
+        if has_bias
+        else compute_size_in_bytes(weight_tensor),
+        temp=0,
+        buffer=0,
+    )
 
     # total cost is the sum of forward and backward cost
-    total_cost = MemoryCost(activation=fwd_memory_cost.activation + bwd_memory_cost.activation,
-                            parameter=fwd_memory_cost.parameter + bwd_memory_cost.parameter)
+    total_cost = MemoryCost(
+        activation=fwd_memory_cost.activation + bwd_memory_cost.activation,
+        parameter=fwd_memory_cost.parameter + bwd_memory_cost.parameter,
+    )
 
     memory_cost = TrainCycleItem(fwd=fwd_memory_cost, bwd=bwd_memory_cost, total=total_cost)
 
-    # store fwd_in
-    fwd_in = [input_tensor]
+    # store fwd_in, fwd_buffer, fwd_out
+    fwd_in = [torch.zeros_like(input_tensor, device="meta")]
+    fwd_buffer = []
+    fwd_out = [torch.zeros_like(output_tensor, device="meta")]
 
-    return compute_cost, memory_cost, fwd_in
+    return compute_cost, memory_cost, fwd_in, fwd_buffer, fwd_out

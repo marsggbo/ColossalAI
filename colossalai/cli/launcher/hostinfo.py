@@ -1,4 +1,3 @@
-from typing import List
 import socket
 
 
@@ -34,21 +33,23 @@ class HostInfo:
         """
 
         if port is None:
-            port = 22    # no port specified, lets just use the ssh port
-        hostname = socket.getfqdn(hostname)
+            port = 22  # no port specified, lets just use the ssh port
+
+        # socket.getfqdn("127.0.0.1") does not return localhost
+        # on some users' machines
+        # thus, we directly return True if hostname is localhost, 127.0.0.1 or 0.0.0.0
         if hostname in ("localhost", "127.0.0.1", "0.0.0.0"):
             return True
+
+        hostname = socket.getfqdn(hostname)
         localhost = socket.gethostname()
         localaddrs = socket.getaddrinfo(localhost, port)
         targetaddrs = socket.getaddrinfo(hostname, port)
-        for (family, socktype, proto, canonname, sockaddr) in localaddrs:
-            for (rfamily, rsocktype, rproto, rcanonname, rsockaddr) in targetaddrs:
-                if rsockaddr[0] == sockaddr[0]:
-                    return True
-        return False
+
+        return localaddrs == targetaddrs
 
     def __str__(self):
-        return f'hostname: {self.hostname}, port: {self.port}'
+        return f"hostname: {self.hostname}, port: {self.port}"
 
     def __repr__(self):
         return self.__str__()

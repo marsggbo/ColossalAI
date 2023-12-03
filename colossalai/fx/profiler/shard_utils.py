@@ -59,9 +59,9 @@ def calculate_fwd_tmp(n: Node) -> int:
         Returns:
             bool: Whether the node is a ReLU-like node
         """
-        if n.op == 'call_function':
+        if n.op == "call_function":
             return n.target in OUTPUT_SAVED_OPS
-        elif n.op == 'call_module':
+        elif n.op == "call_module":
             return type(n.graph.owning_module.get_submodule(n.target)) in OUTPUT_SAVED_MOD
         return False
 
@@ -100,7 +100,7 @@ def calculate_fwd_time(n: Node) -> float:
         fwd_time (float): the result of `fwd_time`
     """
     # TODO(super-dainiu): should divide the time by the number of GPUs as well as TFLOPs
-    return n.meta["fwd_flop"]
+    return n.meta["fwd_time"]
 
 
 def calculate_bwd_time(n: Node) -> float:
@@ -111,4 +111,4 @@ def calculate_bwd_time(n: Node) -> float:
         bwd_time (float): the result of `bwd_time`
     """
     # TODO(super-dainiu): should divide the time by the number of GPUs as well as TFLOPs
-    return n.meta["bwd_flop"]
+    return n.meta["bwd_time"]

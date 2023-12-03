@@ -1,8 +1,11 @@
 import torch
 from torch.nn import functional as F
+
 from colossalai.fx.tracer.meta_patch import patched_function
+from colossalai.testing import clear_cache_before_run
 
 
+@clear_cache_before_run()
 def test_conv():
     # test F.conv_1d
     data_1d = torch.rand(3, 16, 10)
@@ -44,5 +47,5 @@ def test_conv():
     assert out_transpose_3d.shape == patched_out_transpose_3d.shape
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     test_conv()

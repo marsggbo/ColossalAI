@@ -1,10 +1,11 @@
-import operator
+from typing import Any
+
 import torch
-from torch.fx.proxy import Proxy, Attribute
-from typing import List, Union, Any
+from torch.fx.proxy import Proxy
+
 from colossalai.fx.tracer.meta_patch import meta_patched_function
 
-__all__ = ['ColoProxy']
+__all__ = ["ColoProxy"]
 
 
 class ColoProxy(Proxy):
@@ -37,11 +38,12 @@ class ColoProxy(Proxy):
         return self._meta_data is not None
 
     def _assert_meta_data_is_tensor(self):
-        assert torch.is_tensor(
-            self._meta_data) and self._meta_data.is_meta, f'Meta data is not a meta tensor for {self.node.name}'
+        assert (
+            torch.is_tensor(self._meta_data) and self._meta_data.is_meta
+        ), f"Meta data is not a meta tensor for {self.node.name}"
 
     def _assert_has_meta_data(self):
-        assert self._meta_data is not None, f'Meta data is not set for {self.node.name}'
+        assert self._meta_data is not None, f"Meta data is not set for {self.node.name}"
 
     def __len__(self):
         self._assert_has_meta_data()
@@ -60,7 +62,6 @@ class ColoProxy(Proxy):
         return self.meta_data
 
     def __getattr__(self, k):
-
         return ColoAttribute(self, k)
 
     def __contains__(self, key):
@@ -90,7 +91,6 @@ def extract_meta(*args, **kwargs):
 
 
 class ColoAttribute(ColoProxy):
-
     def __init__(self, root, attr: str):
         self.root = root
         self.attr = attr

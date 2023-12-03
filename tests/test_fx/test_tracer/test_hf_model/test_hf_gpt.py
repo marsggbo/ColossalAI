@@ -1,34 +1,28 @@
 import pytest
 import torch
-import transformers
 from hf_tracer_utils import trace_model_and_compare_output
+from packaging import version
 
-BATCH_SIZE = 1
-SEQ_LENGTH = 16
+from colossalai.testing import clear_cache_before_run
+from tests.kit.model_zoo import model_zoo
 
 
+@pytest.mark.skipif(version.parse(torch.__version__) < version.parse("1.12.0"), reason="torch version < 12")
+@clear_cache_before_run()
 def test_gpt():
-    MODEL_LIST = [
-        transformers.GPT2Model,
-        transformers.GPT2LMHeadModel,
-        transformers.GPT2DoubleHeadsModel,
-        transformers.GPT2ForTokenClassification,
-    # transformers.GPT2ForSequenceClassification, # not supported yet
-    ]
+    sub_registry = model_zoo.get_sub_registry("transformers_gpt")
 
-    config = transformers.GPT2Config(n_position=64, n_layer=2, n_head=4)
+    for name, (model_fn, data_gen_fn, _, _, _) in sub_registry.items():
+        model = model_fn()
 
-    def data_gen():
-        input_ids = torch.zeros((BATCH_SIZE, SEQ_LENGTH), dtype=torch.int64)
-        token_type_ids = torch.zeros((BATCH_SIZE, SEQ_LENGTH), dtype=torch.int64)
-        attention_mask = torch.zeros((BATCH_SIZE, SEQ_LENGTH), dtype=torch.int64)
-        kwargs = dict(input_ids=input_ids, token_type_ids=token_type_ids, attention_mask=attention_mask)
-        return kwargs
+        # TODO(ver217): support the following models
+        # 1. GPT2DoubleHeadsModel
+        # as they are not supported, let's skip them
+        if model.__class__.__name__ in ["GPT2DoubleHeadsModel", "GPT2ForQuestionAnswering"]:
+            continue
 
-    for model_cls in MODEL_LIST:
-        model = model_cls(config=config)
-        trace_model_and_compare_output(model, data_gen)
+        trace_model_and_compare_output(model, data_gen_fn, ignore_data=["labels"])
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     test_gpt()

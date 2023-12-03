@@ -49,7 +49,7 @@ pip install -v --disable-pip-version-check --no-cache-dir --no-build-isolation -
 ### 3. Train
 Yon can use colossalai run to launch single-node training:
 ```bash
-colossalai run --standalone --nproc_per_node YOUR_GPU_PER_NODE train.py --OTHER_CONFIGURATIONS
+colossalai run --nproc_per_node YOUR_GPU_PER_NODE train.py --OTHER_CONFIGURATIONS
 ```
 Yon can also use colossalai run to launch multi-nodes training:
 ```bash

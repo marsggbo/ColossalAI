@@ -2,39 +2,74 @@
 
 set -xue
 
-NUM_GPU=8
-MODEL="8b"
+NUM_GPUS=2
+MODEL="base"
 SEQ_LENGTH=2048
-BATCH_SIZE=1
+BATCH_SIZE=2
 LR=0.00001
+PP_SIZE=1
+DP_SIZE=1
+EP_SIZE=2
+
+export CUDA_VISIBLE_DEVICES=6,7
+
+OUTPUT_BASEPATH='./outputs'
+current_time=$(date "+%Y.%m.%d-%H.%M.%S")
+LOG_PATH=${OUTPUT_BASEPATH}/${current_time}
+mkdir -p ${LOG_PATH}
+
 
 # ep zero
-torchrun --standalone --nproc_per_node $NUM_GPU train.py \
+plugin="ep_zero" # ep/ep_zero/hybrid
+NAME="gpt-${MODEL}-lr${LR}-bs${BATCH_SIZE}-gpus${NUM_GPUS}-plugin${plugin}-pp${PP_SIZE}-dp${DP_SIZE}-ep${EP_SIZE}"
+
+colossalai run --nproc_per_node $NUM_GPUS train.py \
     --num_epoch 1 \
     --model_name $MODEL \
-    --plugin "ep_zero" \
+    --plugin ${plugin} \
     --batch_size $BATCH_SIZE \
     --lr $LR \
-    --zero_stage 1 \
-    --extra_dp_size 2
+    --zero_stage 2 \
+    --extra_dp_size 2 \
+    --pp_size $PP_SIZE \
+    --dp_size $DP_SIZE \
+    --ep_size $EP_SIZE \
+    --output_path ${LOG_PATH } \
+    $@ \
+    2>&1 | tee ${LOG_PATH}/${NAME}.log
 
 # ep
-# torchrun --standalone --nproc_per_node $NUM_GPU train.py \
-#     --num_epoch 1 \
-#     --model_name $MODEL \
-#     --plugin "ep_zero" \
-#     --batch_size $BATCH_SIZE \
-#     --lr $LR \
-#     --zero_stage 1
+# plugin="ep" # ep/ep_zero/hybrid
+# NAME="gpt-${MODEL}-lr${LR}-bs${BATCH_SIZE}-gpus${NUM_GPUS}-plugin${plugin}-pp${PP_SIZE}-dp${DP_SIZE}-ep${EP_SIZE}"
 
-# hybrid
-# torchrun --standalone --nproc_per_node $NUM_GPU train.py \
+# colossalai run --nproc_per_node $NUM_GPUS train.py \
 #     --num_epoch 1 \
 #     --model_name $MODEL \
-#     --plugin "hybrid" \
+#     --plugin ${plugin} \
 #     --batch_size $BATCH_SIZE \
 #     --lr $LR \
 #     --zero_stage 1 \
-#     --pp_size 2 \
-#     --dp_size 1 \
-#     --ep_size 2 \
+#     --pp_size $PP_SIZE \
+#     --dp_size $DP_SIZE \
+#     --ep_size $EP_SIZE \
+#     --output_path ${LOG_PATH } \
+#     $@ \
+#     2>&1 | tee ${LOG_PATH}/${NAME}.log
+
+# hybrid
+# plugin="hybrid" # ep/ep_zero/hybrid
+# NAME="gpt-${MODEL}-lr${LR}-bs${BATCH_SIZE}-gpus${NUM_GPUS}-plugin${plugin}-pp${PP_SIZE}-dp${DP_SIZE}-ep${EP_SIZE}"
+
+# colossalai run --nproc_per_node $NUM_GPUS train.py \
+#     --num_epoch 1 \
+#     --model_name $MODEL \
+#     --plugin ${plugin} \
+#     --batch_size $BATCH_SIZE \
+#     --lr $LR \
+#     --zero_stage 1 \
+#     --pp_size $PP_SIZE \
+#     --dp_size $DP_SIZE \
+#     --ep_size $EP_SIZE \
+#     --output_path ${LOG_PATH } \
+#     $@ \
+#     2>&1 | tee ${LOG_PATH}/${NAME}.log

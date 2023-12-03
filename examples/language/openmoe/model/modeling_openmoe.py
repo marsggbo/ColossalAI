@@ -1114,3 +1114,76 @@ class ZLossCrossEntropy(torch.autograd.Function):
             g_targets.to(targets.dtype),
             None,
         )
+
+
+if __name__ == '__main__':
+    from transformers.models.llama import LlamaConfig
+    from colossalai.moe.utils import skip_init
+
+    # build model
+    repo_name = "hpcaitech/openmoe-base"
+    config = LlamaConfig.from_pretrained(repo_name)
+    set_openmoe_args(
+        config,
+        # num_hidden_layers=2,
+        num_experts=4,
+        moe_layer_interval=1,
+        router_aux_loss_factor=0.01,
+        router_z_loss_factor=0.0001,
+        z_loss_factor=0.0001,
+        enable_load_balance=False,
+        enable_comm_overlap=False,
+        enable_hierarchical_alltoall=False,
+        enable_kernel=False,
+    )
+    with skip_init():
+        model = OpenMoeForCausalLM(config).cuda().half()
+
+
+    # 生成模拟数据
+    seq_length = 2  # 序列长度
+    batch_size = 4  # 批次大小
+    vocab_size = 100  # 词汇表大小
+
+    # 随机生成输入标识符（input_ids）
+    input_ids = torch.randint(0, vocab_size, (batch_size, seq_length)).cuda()
+    # 生成输入嵌入表示（inputs_embeds）
+    inputs_embeds = None  # 例子中为形状为 (batch_size, seq_length, 256) 的张量
+
+    # 生成注意力掩码（attention_mask）
+    attention_mask = torch.ones(batch_size, seq_length)
+
+    # 生成位置标识符（position_ids）
+    position_ids = torch.arange(seq_length).unsqueeze(0).expand(batch_size, -1)
+
+    # 生成过去键值对信息（past_key_values）
+    past_key_values = [
+        torch.randn((2, batch_size, 64)),  # 例子中为形状为 (2, batch_size, 64) 的张量
+        torch.randn((2, batch_size, 64))
+    ]
+
+
+    # 生成标签（labels）
+    labels = torch.randint(0, vocab_size, (batch_size, seq_length))
+
+    # 其他参数
+    use_cache = True
+    output_attentions = True
+    output_hidden_states = True
+    return_dict = True
+    chunk_head = True
+
+    outputs = model(
+        input_ids=input_ids,
+        # attention_mask=attention_mask,
+        # position_ids=position_ids,
+        # past_key_values=past_key_values,
+        # inputs_embeds=inputs_embeds,
+        # labels=labels,
+        # use_cache=use_cache,
+        # output_attentions=output_attentions,
+        # output_hidden_states=output_hidden_states,
+        # return_dict=return_dict,
+        # chunk_head=chunk_head
+    )
+    print(outputs.logits.shape)

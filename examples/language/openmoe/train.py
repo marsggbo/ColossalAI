@@ -196,6 +196,13 @@ def parse_args():
         action="store_true",
         help="Use hierarchical all-to-all for MoE. Recommended to enable for muiti-node training.",
     )
+    
+    # debug
+    parser.add_argument(
+        "--ipdb",
+        action="store_true",
+        help="enable debug mode using ipdb",
+    )
 
     args = parser.parse_args()
     return args
@@ -203,6 +210,9 @@ def parse_args():
 
 def main():
     args = parse_args()
+    if args.ipdb:
+        from ipdb import set_trace
+        set_trace()
 
     # Launch ColossalAI
     colossalai.launch_from_torch(config={}, seed=args.seed)

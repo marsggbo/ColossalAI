@@ -67,11 +67,15 @@ class MLPExperts(nn.Module):
             self.ep_size = 1
 
         if gated:
-            self.wi_gate = nn.Parameter(torch.empty(num_experts, hidden_size, intermediate_size * 2))
-            self.wi_up = nn.Parameter(torch.empty(num_experts, hidden_size, intermediate_size))
+            self.wi_gate = nn.Parameter(torch.rand(num_experts, hidden_size, intermediate_size * 2))
+            # self.ln_wi_gate = nn.LayerNorm(intermediate_size * 2)
+            self.wi_up = nn.Parameter(torch.rand(num_experts, hidden_size, intermediate_size))
+            # self.ln_wi_up = nn.LayerNorm(intermediate_size)
         else:
-            self.wi = nn.Parameter(torch.empty(num_experts, hidden_size, intermediate_size))
-        self.wo = nn.Parameter(torch.empty(num_experts, intermediate_size, hidden_size))
+            self.wi = nn.Parameter(torch.rand(num_experts, hidden_size, intermediate_size))
+            # self.ln_wi = nn.LayerNorm(intermediate_size)
+        self.wo = nn.Parameter(torch.rand(num_experts, intermediate_size, hidden_size))
+        # self.ln_after_wo = nn.LayerNorm(hidden_size)
 
         self.act_name = activation
         self.act = get_activation(activation)
@@ -83,6 +87,10 @@ class MLPExperts(nn.Module):
 
         # init param
         self.reset_parameters()
+        # func = lambda x:(x.min().item(), x.mean().item(), x.max().item())
+        # print(f"wi_gate: {func(self.wi_gate)}")
+        # print(f"wi_up: {func(self.wi_up)}")
+        # print(f"wo: {func(self.wo)}")
 
     @torch.no_grad()
     def reset_parameters(self):
@@ -114,6 +122,7 @@ class MLPExperts(nn.Module):
         Returns:
             torch.Tensor: The output tensor of shape (num_groups, num_experts, capacity, hidden_size)
         """
+        # func = lambda x:(x.min().item(), x.mean().item(), x.max().item())
         x = MoeInGradScaler.apply(x, self.ep_size)
 
         e = x.size(1)
@@ -135,16 +144,23 @@ class MLPExperts(nn.Module):
 
         if self.gated:
             x_gate = [torch.mm(x[i], self.wi_gate[param_slice][i]) for i in range(e)]
+            # x_gate = [self.ln_wi_gate(x_gate[i]) for i in range(e)]
+            # print(f"x_gate: {func(torch.stack(x_gate))}")
             x_up = [torch.mm(x[i], self.wi_up[param_slice][i]) for i in range(e)]
+            # x_up = [self.ln_wi_up(x_up[i]) for i in range(e)]
+            # print(f"x_up: {func(torch.stack(x_up))}")
             if self.use_kernel and HAS_TRITON and self.act_name == "swiglu":
                 x = [LlamaActCombine.apply(x_gate[i], x_up[i]) for i in range(e)]
             else:
                 x = [self.act(x_gate[i]) * x_up[i] for i in range(e)]
+            # print(f"x: {func(torch.stack(x))}")
         else:
             x = [torch.mm(x[i], self.wi[param_slice][i]) for i in range(e)]
             x = [self.act(x[i]) for i in range(e)]
         x = [self.drop(x[i]) for i in range(e)]
         x = [torch.mm(x[i], self.wo[param_slice][i]) for i in range(e)]
+        # x = [self.ln_after_wo(x[i]) for i in range(e)]
+        # print(f"x: {func(torch.stack(x))}")
 
         if self.use_kernel and use_sparse:
             for i in range(e):
@@ -154,4 +170,5 @@ class MLPExperts(nn.Module):
         x = x.reshape(inshape)
         x = x.transpose(0, 1).contiguous()
         x = MoeOutGradScaler.apply(x, self.ep_size)
+        # print(f"x: {func(x)}")
         return x

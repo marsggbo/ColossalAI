@@ -2,16 +2,16 @@
 
 set -xue
 
-NUM_GPUS=2
+NUM_GPUS=4
 MODEL="base"
 SEQ_LENGTH=2048
-BATCH_SIZE=2
-LR=0.00001
+BATCH_SIZE=16
+LR=0.0005
 PP_SIZE=1
-DP_SIZE=1
+DP_SIZE=2                                       
 EP_SIZE=2
 
-export CUDA_VISIBLE_DEVICES=6,7
+export CUDA_VISIBLE_DEVICES=2,3,4,5
 
 OUTPUT_BASEPATH='./outputs'
 current_time=$(date "+%Y.%m.%d-%H.%M.%S")
@@ -23,8 +23,8 @@ mkdir -p ${LOG_PATH}
 plugin="ep_zero" # ep/ep_zero/hybrid
 NAME="gpt-${MODEL}-lr${LR}-bs${BATCH_SIZE}-gpus${NUM_GPUS}-plugin${plugin}-pp${PP_SIZE}-dp${DP_SIZE}-ep${EP_SIZE}"
 
-colossalai run --nproc_per_node $NUM_GPUS train.py \
-    --num_epoch 1 \
+colossalai run --master_port 6689 --nproc_per_node $NUM_GPUS train.py \
+    --num_epoch 50 \
     --model_name $MODEL \
     --plugin ${plugin} \
     --batch_size $BATCH_SIZE \
@@ -34,10 +34,11 @@ colossalai run --nproc_per_node $NUM_GPUS train.py \
     --pp_size $PP_SIZE \
     --dp_size $DP_SIZE \
     --ep_size $EP_SIZE \
-    --output_path ${LOG_PATH } \
+    --output_path ${LOG_PATH} \
     $@ \
     2>&1 | tee ${LOG_PATH}/${NAME}.log
 
+#  --dataset wikitext --task_name wikitext-2-v1
 # ep
 # plugin="ep" # ep/ep_zero/hybrid
 # NAME="gpt-${MODEL}-lr${LR}-bs${BATCH_SIZE}-gpus${NUM_GPUS}-plugin${plugin}-pp${PP_SIZE}-dp${DP_SIZE}-ep${EP_SIZE}"

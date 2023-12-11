@@ -88,7 +88,7 @@ class SparseMLP(nn.Module):
         )
 
         # gate
-        self.gate_weight = torch.nn.Parameter(torch.empty(num_experts, self.hidden_size))
+        self.gate_weight = torch.nn.Parameter(torch.rand(num_experts, self.hidden_size))
 
         # moe experts
         self.experts = MLPExperts(
@@ -147,6 +147,7 @@ class SparseMLP(nn.Module):
             torch.Tensor: The output tensor of shape (batch_size, seq_len, hidden_size)
         """
         # reshape the input tokens
+        # func = lambda x:(x.min().item(), x.mean().item(), x.max().item())
         tokens = inputs.reshape(-1, self.hidden_size)
 
         # the data type of the inputs in the gating should be fp32
@@ -190,6 +191,7 @@ class SparseMLP(nn.Module):
             )
         elif self.expert_parallel is None:
             expert_output = self._local_process(dispatch_data)
+            # print(f"expert_output: {func(expert_output)}")
         else:
             raise NotImplementedError("This kind of communication has not been implemented yet.\n"
                                       "Please use Experts build function.")
@@ -199,9 +201,11 @@ class SparseMLP(nn.Module):
             ans = MoeCombine.apply(expert_output, *route_result_list)
         else:
             combine_weights = route_result_list[0].type_as(inputs)
+            # print(f"combine_weights: {func(combine_weights)}")
             combine_weights = combine_weights.view(combine_weights.shape[0], -1)
             expert_output = expert_output.view(-1, expert_output.shape[-1])
             ans = torch.matmul(combine_weights, expert_output)
+            # print(f"ans: {func(ans)}")
 
         ans = ans.reshape(inputs.shape)
         return ans

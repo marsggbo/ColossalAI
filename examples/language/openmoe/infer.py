@@ -40,7 +40,7 @@ ValueError: invalid literal for int() with base 10: 'hello'
 ```
 sum = 0
 for i in range(100):
-        sum += i
+    sum += i
 ```
 What is the value of sum immediately after the 10th time line 3 is executed?"""
 

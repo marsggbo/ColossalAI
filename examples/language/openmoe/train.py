@@ -39,11 +39,12 @@ def load_ckpt(repo_name: str, model: OpenMoeForCausalLM, booster: Booster):
         ckpt_path = os.path.join(ckpt_path, "pytorch_model.bin.index.json")
     else:
         raise ValueError(f"Invalid checkpoint path: {ckpt_path}")
-    booster.load_model(model, ckpt_path)
+    booster.load_model(model, ckpt_path, strict=False)
 
 
 def tokenize_data(batch, tokenizer: T5Tokenizer, max_length: int) -> Dict:
-    texts = ["<pad>" + sample["prompt"] + sample["completion"] for sample in batch]
+    # texts = ["<pad>" + sample["prompt"] + sample["completion"] for sample in batch] # `--dataset yizhongw/self_instruct --task_name super_natural_instructions``
+    texts = ["<pad>"+sample['text'] for sample in batch] # `--dataset wikitext --task_name wikitext-2-v1`
     data = tokenizer(
         texts,
         return_tensors="pt",
@@ -296,9 +297,15 @@ def main():
         enable_hierarchical_alltoall=args.hierarchical_alltoall,
         enable_kernel=args.use_kernel,
     )
+    # config.num_hidden_layers = 4
+    # config.hidden_size = 128
+    # config.intermediate_size = 32
+    print(config)
+    print(args)
     with skip_init():
         model = OpenMoeForCausalLM(config)
-    coordinator.print_on_master(f"Finish init model with config:\n{config}")
+    params = sum([p.numel() for p in model.parameters()])
+    coordinator.print_on_master(f"Finish init model with config:\n{config} #params={params}")
 
     # Enable gradient checkpointing
     model.gradient_checkpointing_enable()

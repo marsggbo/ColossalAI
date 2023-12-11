@@ -341,7 +341,7 @@ class OpenMoeAttention(nn.Module):
             key_states = self.k_proj(hidden_states)
             value_states = self.v_proj(hidden_states)
 
-        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2) # bsz x num_heads x q_len x head_dim
         key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
         value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
 
@@ -357,7 +357,7 @@ class OpenMoeAttention(nn.Module):
 
         past_key_value = (key_states, value_states) if use_cache else None
 
-        query_states = query_states.transpose(1, 2)
+        query_states = query_states.transpose(1, 2) # bs x q_len x num_heads x head_dim
         key_states = key_states.transpose(1, 2)
         max_length = max(query_states.shape[1], key_states.shape[1])
         assert max_length <= self.sin.shape[0]
@@ -366,7 +366,7 @@ class OpenMoeAttention(nn.Module):
         query_states, key_states = apply_rotary_embedding(
             query_states, key_states, cos, sin, decode=True if q_len == 1 else False, rotary_index=position_ids
         )
-        query_states = query_states.transpose(1, 2)
+        query_states = query_states.transpose(1, 2) # bs x num_heads x q_len x head_dim
         key_states = key_states.transpose(1, 2)
 
         # repeat k/v heads if n_kv_heads < n_heads
@@ -376,11 +376,11 @@ class OpenMoeAttention(nn.Module):
         if HAS_FLASH_ATTN and use_kernel:
             from flash_attn import flash_attn_func
 
-            query_states = query_states.transpose(1, 2)
+            query_states = query_states.transpose(1, 2) # bs x q_len x num_heads x head_dim
             key_states = key_states.transpose(1, 2)
             value_states = value_states.transpose(1, 2)
-            attn_output = flash_attn_func(query_states, key_states, value_states, softmax_scale=1.0, causal=True)
-            attn_output = attn_output.transpose(1, 2).contiguous()
+            attn_output = flash_attn_func(query_states, key_states, value_states, softmax_scale=1.0, causal=True) # bs x q_len x num_heads x head_dim
+            attn_output = attn_output.transpose(1, 2).contiguous() # bs x num_heads x q_len x head_dim
         else:
             attn_weights = torch.matmul(query_states, key_states.transpose(2, 3))
 
@@ -410,8 +410,8 @@ class OpenMoeAttention(nn.Module):
                 f" {attn_output.size()}"
             )
 
-        attn_output = attn_output.transpose(1, 2).contiguous()
-        attn_output = attn_output.reshape(bsz, q_len, self.num_heads * self.head_dim)
+        attn_output = attn_output.transpose(1, 2).contiguous() # bs x q_len x num_heads x head_dim
+        attn_output = attn_output.reshape(bsz, q_len, self.num_heads * self.head_dim) # bs x q_len x d_model
 
         if self.pretraining_tp > 1:
             attn_output = attn_output.split(self.hidden_size // self.pretraining_tp, dim=2)
@@ -932,6 +932,7 @@ class OpenMoeForCausalLM(OpenMoePreTrainedModel):
                     def custom_forward(*inputs):
                         logits = module(inputs[0])
                         logits = logits.float()
+                        # print("logits", logits.min().item(), logits.mean().item(), logits.max().item())
                         # Shift so that tokens < n predict n
                         shift_logits = logits[..., :-1, :].contiguous().float()
                         shift_labels = inputs[1][..., 1:].contiguous()
@@ -943,23 +944,30 @@ class OpenMoeForCausalLM(OpenMoePreTrainedModel):
 
                 aux_loss, z_loss = self._calculate_router_loss()
                 loss = aux_loss + z_loss
+                ce_loss = 0
                 for batch_idx in range(hidden_states.shape[0]):
-                    loss = loss + torch.utils.checkpoint.checkpoint(
+                    ce_loss = ce_loss + torch.utils.checkpoint.checkpoint(
                         create_custom_forward(self.lm_head),
                         hidden_states[batch_idx : batch_idx + 1, :],
                         labels[batch_idx : batch_idx + 1, :],
                     )
+                loss = loss + ce_loss
+                # print(f"Loss aux:{aux_loss.item():.4f} z:{z_loss.item():.4f} ce:{ce_loss.item():.4f}")
                 logits = None
             else:
                 logits = self.lm_head(hidden_states)
                 logits = logits.float()
+                # print("logits", logits.min(), logits.mean(), logits.max())
                 # Shift so that tokens < n predict n
                 shift_logits = logits[..., :-1, :].contiguous()
                 shift_labels = labels[..., 1:].contiguous()
                 # Flatten the tokens
                 aux_loss, z_loss = self._calculate_router_loss()
                 loss = aux_loss + z_loss
-                loss = loss + self._calculate_loss(shift_logits, shift_labels)
+                ce_loss = self._calculate_loss(shift_logits, shift_labels)
+                loss = loss + ce_loss
+                # loss = loss + self._calculate_loss(shift_logits, shift_labels)
+                # print(f"Loss aux:{aux_loss:.4f} z:{z_loss:.4f} ce:{ce_loss:.4f}")
 
         if not return_dict:
             output = (logits,) + outputs[1:]
@@ -1046,7 +1054,7 @@ class OpenMoeForCausalLM(OpenMoePreTrainedModel):
             (1,) * len(targets.shape) + (-1,)
         )
         soft_targets = torch.where(
-            soft_targets, torch.full_like(soft_targets, confidence), torch.full_like(soft_targets, low_confidence)
+            soft_targets, torch.full_like(soft_targets.float(), confidence), torch.full_like(soft_targets.float(), low_confidence)
         )
         soft_targets = soft_targets.to(torch.float32)
 
@@ -1125,7 +1133,6 @@ if __name__ == '__main__':
     config = LlamaConfig.from_pretrained(repo_name)
     set_openmoe_args(
         config,
-        # num_hidden_layers=2,
         num_experts=4,
         moe_layer_interval=1,
         router_aux_loss_factor=0.01,
@@ -1136,6 +1143,7 @@ if __name__ == '__main__':
         enable_hierarchical_alltoall=False,
         enable_kernel=False,
     )
+    config.num_hidden_layers = 2
     with skip_init():
         model = OpenMoeForCausalLM(config).cuda().half()
 
@@ -1179,11 +1187,11 @@ if __name__ == '__main__':
         # position_ids=position_ids,
         # past_key_values=past_key_values,
         # inputs_embeds=inputs_embeds,
-        # labels=labels,
+        labels=labels,
         # use_cache=use_cache,
         # output_attentions=output_attentions,
         # output_hidden_states=output_hidden_states,
         # return_dict=return_dict,
-        # chunk_head=chunk_head
+        chunk_head=False
     )
     print(outputs.logits.shape)

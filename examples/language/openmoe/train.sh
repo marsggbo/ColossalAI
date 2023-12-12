@@ -2,16 +2,16 @@
 
 set -xue
 
-NUM_GPUS=4
+NUM_GPUS=2
 MODEL="base"
 SEQ_LENGTH=2048
-BATCH_SIZE=16
-LR=0.0005
+BATCH_SIZE=8
+LR=0.000015
 PP_SIZE=1
 DP_SIZE=2                                       
 EP_SIZE=2
 
-export CUDA_VISIBLE_DEVICES=2,3,4,5
+export CUDA_VISIBLE_DEVICES=6,7
 
 OUTPUT_BASEPATH='./outputs'
 current_time=$(date "+%Y.%m.%d-%H.%M.%S")

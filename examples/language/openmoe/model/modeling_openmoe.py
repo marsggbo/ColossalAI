@@ -951,7 +951,7 @@ class OpenMoeForCausalLM(OpenMoePreTrainedModel):
                         hidden_states[batch_idx : batch_idx + 1, :],
                         labels[batch_idx : batch_idx + 1, :],
                     )
-                loss = loss + ce_loss
+                loss = loss + ce_loss / hidden_states.shape[0]
                 # print(f"Loss aux:{aux_loss.item():.4f} z:{z_loss.item():.4f} ce:{ce_loss.item():.4f}")
                 logits = None
             else:

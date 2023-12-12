@@ -43,8 +43,8 @@ def load_ckpt(repo_name: str, model: OpenMoeForCausalLM, booster: Booster):
 
 
 def tokenize_data(batch, tokenizer: T5Tokenizer, max_length: int) -> Dict:
-    # texts = ["<pad>" + sample["prompt"] + sample["completion"] for sample in batch] # `--dataset yizhongw/self_instruct --task_name super_natural_instructions``
-    texts = ["<pad>"+sample['text'] for sample in batch] # `--dataset wikitext --task_name wikitext-2-v1`
+    texts = ["<pad>" + sample["prompt"] + sample["completion"] for sample in batch] # `--dataset yizhongw/self_instruct --task_name super_natural_instructions``
+    # texts = ["<pad>"+sample['text'] for sample in batch] # `--dataset wikitext --task_name wikitext-2-v1`
     data = tokenizer(
         texts,
         return_tensors="pt",
@@ -136,7 +136,7 @@ def parse_args():
 
     # optim
     parser.add_argument("--lr", type=float, default=1e-5, help="Learning rate.")
-    parser.add_argument("--weight_decay", type=float, default=0.0, help="Weight decay to use.")
+    parser.add_argument("--weight_decay", type=float, default=1e-4, help="Weight decay to use.")
 
     # zero stage for all plugins
     parser.add_argument("--zero_stage", type=int, default=2, help="zero stage.")
@@ -302,8 +302,9 @@ def main():
     # config.intermediate_size = 32
     print(config)
     print(args)
-    with skip_init():
-        model = OpenMoeForCausalLM(config)
+    # with skip_init():
+    #     model = OpenMoeForCausalLM(config)
+    model = OpenMoeForCausalLM(config)
     params = sum([p.numel() for p in model.parameters()])
     coordinator.print_on_master(f"Finish init model with config:\n{config} #params={params}")
 

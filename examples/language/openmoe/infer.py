@@ -57,29 +57,36 @@ def inference(args):
     model = model.eval().bfloat16()
     model = model.to(torch.cuda.current_device())
 
-    # input examples for yizhongw datasets
-    # inputs = [
-    #     """In this task, you are given two sets, and a question. You need to find whether an element is at the intersection of two given sets. A Set is shown by two curly braces and comma-separated numbers inside, like {1, 2, 3}. The intersection of two given sets is the largest set which contains all the elements that are common to both sets. An element is at the intersection of two given sets, A and B, if common to both A and B. Classify your answers into 'Yes' or 'No'. Input: Set1: '{2, 6, 8, 9, 11, 13, 18}', Set2: '{2, 12}'. Is the element '9' in the intersection of Set1 and Set2 ? Output:""",
-    #     """In this task you are given a question. You need to generate an answer to the question. Input: Question:What is the opposite side from starboard on a ship? Output:""",
-    #     """In this task, you are given a list of integers and an integer k. You need to add integer k to each element in the list and return the updated list. Input: [133, 281, 294, 97, 66, 269, 39, 92, 25, 162, 16, 226, 76, 119, 268, 12, 296, 103, 211, 163] k=1. Output:""",
-    #     """In this task, you are given a country name and you need to return the capital city of the given country. Input: Falkland Islands. Output:"""
-    # ]
+    # # input examples for yizhongw datasets
+    inputs = [
+        # """In this task, you are given two sets, and a question. You need to find whether an element is at the intersection of two given sets. A Set is shown by two curly braces and comma-separated numbers inside, like {1, 2, 3}. The intersection of two given sets is the largest set which contains all the elements that are common to both sets. An element is at the intersection of two given sets, A and B, if common to both A and B. Classify your answers into 'Yes' or 'No'. Input: Set1: '{2, 6, 8, 9, 11, 13, 18}', Set2: '{2, 12}'. Is the element '9' in the intersection of Set1 and Set2 ? Output:""",
+        # """In this task you are given a question. You need to generate an answer to the question. Input: Question:What is the opposite side from starboard on a ship? Output:""",
+        """In this task, you are given a list of integers and an integer k. You need to add integer k to each element in the list and return the updated list. Input: [133, 281, 294, 97, 66, 269, 39, 92, 25, 162, 16, 226, 76, 119, 268, 12, 296, 103, 211, 163] k=1. Output:""",
+        # """In this task, you are given a country name and you need to return the capital city of the given country. Input: Falkland Islands. Output:""",
+        # """In this task, the input is a set of dialogues between a user and an assistant. You need to find the dialogue that is basically a response given to a question or an aspect of the user. Input: Cool. Anything more about its history? I see... Anything more about their economy? In recent years, economic growth has been impressive, reaching a 6.9% in 2007, one of the highest economic growth rate in Latin America. Cool. Can you tell me about its history? That's very interesting. Can you tell me about their economy? Output:""",
+    ]
     
     # input examples for wikitext-2-v1
-    inputs = [
-        """Senjō no Valkyria 3 : <unk> Chronicles ( Japanese : 戦場のヴァルキュリア3 , lit . Valkyria of the Battlefield 3 ) , commonly referred to as Valkyria Chronicles III outside Japan , is a tactical role @-@ playing video game developed by Sega and Media.Vision for the PlayStation Portable . Released in January 2011 in Japan , it is the third game in the Valkyria series . <unk> the same fusion of tactical and real @-@ time gameplay as its predecessors , the story runs parallel to the first game and follows the " Nameless " , a penal military unit serving the nation of Gallia during the Second Europan War who perform secret black operations and are pitted against the Imperial unit " <unk> Raven " .""",
-        """Troops are divided into five classes : Scouts , <unk> , Engineers , <unk> and Armored Soldier . <unk> can switch classes by changing their assigned weapon . Changing class does not greatly affect the stats gained while in a previous class . With victory in battle , experience points are awarded to the squad , which are distributed into five different attributes shared by the entire squad , a feature differing from early games ' method of distributing to different unit types .""",
-        """The plain maskray generally hunts at the surface of the bottom substrate , rather than digging for prey . Its diet consists predominantly of <unk> shrimp and polychaete worms . Small bony fishes are also eaten , along with the occasional <unk> <unk> or <unk> . Larger rays consume a greater variety of prey and relatively more polychaete worms when compared to smaller rays . This species is <unk> by the <unk> <unk> <unk> .""",
-    ]
-    input_str = inputs[-1][:100]
-    print(f"Input: \n{input_str}\n")
-    # print("model config: ", model.config)
+    # inputs = [
+    #     """Senjō no Valkyria 3 : <unk> Chronicles ( Japanese : 戦場のヴァルキュリア3 , lit . Valkyria of the Battlefield 3 ) , commonly referred to as Valkyria Chronicles III outside Japan , is a tactical role @-@ playing video game developed by Sega and Media.Vision for the PlayStation Portable . Released in January 2011 in Japan , it is the third game in the Valkyria series . <unk> the same fusion of tactical and real @-@ time gameplay as its predecessors , the story runs parallel to the first game and follows the " Nameless " , a penal military unit serving the nation of Gallia during the Second Europan War who perform secret black operations and are pitted against the Imperial unit " <unk> Raven " .""",
+        # """Troops are divided into five classes : Scouts , <unk> , Engineers , <unk> and Armored Soldier . <unk> can switch classes by changing their assigned weapon . Changing class does not greatly affect the stats gained while in a previous class . With victory in battle , experience points are awarded to the squad , which are distributed into five different attributes shared by the entire squad , a feature differing from early games ' method of distributing to different unit types .""",
+        # """The plain maskray generally hunts at the surface of the bottom substrate , rather than digging for prey . Its diet consists predominantly of <unk> shrimp and polychaete worms . Small bony fishes are also eaten , along with the occasional <unk> <unk> or <unk> . Larger rays consume a greater variety of prey and relatively more polychaete worms when compared to smaller rays . This species is <unk> by the <unk> <unk> <unk> .""",
+        # """For several years the arsenal , which was owned by the federal government , served as a simple arms depot and was staffed with only a handful of soldiers . But in November 1860 , with the American Civil War on the horizon , a company of the Second United States Artillery , consisting of sixty @-@ five men , was transferred to Little Rock under the command of Captain James Totten . On January 15 , 1861 , the state legislature decided to hold a referendum to determine if a state convention should be held to consider the issue of <unk> and to elect delegates to such a convention . It was planned for February 18 ; however , events at the arsenal , would not wait . On January 28 , then Governor Henry Massey Rector informed Captain Totten that he and his soldiers would be " permitted to remain in the possession of the Federal officers until the State , by authority of the people , shall have determined to <unk> their connection with the General Government , " Totten responded to this by telling the Governor that his orders came from the United States Government and began a desperate but ultimately futile dispatch of letters and <unk> asking for reinforcements , although rumors were widely spread that they were already coming . The first telegraph wire to span between Little Rock and Memphis had recently been completed . Local attorney John M Harrel was asked to compose the first telegraph dispatched from Arkansas 's capital . In his message , Harrel reported unconfirmed rumors that more federal troops had been sent to reinforce the Little Rock Arsenal .""",
+        # """The United States troops at the outposts of the western frontier of the state and in the Indian nation have all been recalled from winter quarters to reinforce the garrison at Fort Smith . The garrison at Fort Smith had been previously transferred to the United States Arsenal in this city ( Little Rock ) . The arsenal is one of the richest <unk> of military stores in the United States and is supposed to be the ultimate destination of the <unk> [ sic ] ordered from the frontier .""",
+        # """The Gambia women 's national football team represents the Gambia in international football competition . The team , however , has not competed in a match recognised by FIFA , the sport 's international governing body , despite that organised women 's football has been played in the country since 1998 . The Gambia has two youth teams , an under @-@ 17 side that has competed in FIFA U @-@ 17 Women 's World Cup qualifiers , and"""
+    # ]
+    # input_str = inputs[-1][:100]
 
-    input_ids = tokenizer("<pad>" + input_str, return_tensors="pt", add_special_tokens=False)
-    input_ids = input_ids.input_ids.to(torch.cuda.current_device())
-    generation_output = model.generate(input_ids, use_cache=True, do_sample=True, max_new_tokens=64)
-    out = tokenizer.decode(generation_output[0], skip_special_tokens=True)
-    print(f"output: \n{out}\n")
+    print("model config: ", model.config)
+    for input_str in inputs:
+        
+        print(f"Input: \n{input_str}\n")
+
+        input_ids = tokenizer("<pad>" + input_str, return_tensors="pt", add_special_tokens=False)
+        input_ids = input_ids.input_ids.to(torch.cuda.current_device())
+        generation_output = model.generate(input_ids, use_cache=True, do_sample=True, max_new_tokens=64)
+        out = tokenizer.decode(generation_output[0], skip_special_tokens=True)
+        print(f"output: \n{out}\n")
 
 
 ##################################

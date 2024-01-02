@@ -5,7 +5,7 @@ from typing import Dict
 
 import torch
 import torch.distributed as dist
-from datasets import load_dataset
+from datasets import load_dataset, concatenate_datasets
 from huggingface_hub import snapshot_download
 from model.modeling_openmoe import OpenMoeForCausalLM, set_openmoe_args
 from model.openmoe_policy import OpenMoeForCausalLMPolicy
@@ -42,9 +42,11 @@ def load_ckpt(repo_name: str, model: OpenMoeForCausalLM, booster: Booster):
     booster.load_model(model, ckpt_path, strict=False)
 
 
-def tokenize_data(batch, tokenizer: T5Tokenizer, max_length: int) -> Dict:
-    texts = ["<pad>" + sample["prompt"] + sample["completion"] for sample in batch] # `--dataset yizhongw/self_instruct --task_name super_natural_instructions``
-    # texts = ["<pad>"+sample['text'] for sample in batch] # `--dataset wikitext --task_name wikitext-2-v1`
+def tokenize_data(batch, args, tokenizer: T5Tokenizer, max_length: int) -> Dict:
+    if args.dataset == 'yizhongw/self_instruct':
+        texts = ["<pad>" + sample["prompt"] + sample["completion"] for sample in batch] # `--dataset yizhongw/self_instruct --task_name super_natural_instructions``
+    elif args.dataset == 'wikitext':
+        texts = ["<pad>"+sample['text'] for sample in batch] # `--dataset wikitext --task_name wikitext-2-v1`
     data = tokenizer(
         texts,
         return_tensors="pt",
@@ -204,9 +206,70 @@ def parse_args():
         action="store_true",
         help="enable debug mode using ipdb",
     )
+    # test mode
+    parser.add_argument(
+        "--valid_only",
+        action="store_true",
+        help="Only run the test code.",
+    )
+    parser.add_argument(
+        "--valid_ckpt_path",
+        type=str,
+        help="The checkpoint path for validation.",
+    )
+    parser.add_argument(
+        "--comment",
+        type=str,
+        help="Comment for the experiment.",
+    )
 
     args = parser.parse_args()
     return args
+
+
+def perplexity_func(logits, target_ids):
+    # 获取有效的标签数量，因为模型内部向左偏移了一个位置
+    trg_len = target_ids.size(1)
+    valid_labels = target_ids[:, 1:]  # 剔除起始标记 [CLS]，获取有效标签
+    valid_logits = logits[:, :-1, :]  # 对 logits 进行相应裁剪，使其与有效标签对齐
+
+    # 定义损失函数为交叉熵损失
+    loss_function = torch.nn.CrossEntropyLoss()
+
+    # 将 logits 展平为二维张量，将有效标签展平为一维张量
+    logits_flat = valid_logits.contiguous().view(-1, valid_logits.size(-1))
+    labels_flat = valid_labels.contiguous().view(-1)
+
+    # 计算交叉熵损失
+    neg_log_likelihood = loss_function(logits_flat, labels_flat)
+    ppl = torch.exp(neg_log_likelihood).item()
+    return ppl
+
+
+def validate(args, dataloader, model, tokenizer):
+    model.eval()
+    ppls = []
+    device = torch.cuda.current_device()
+    local_rank = dist.get_rank()
+    dataloader_iter = iter(dataloader)
+    total_len = len(dataloader_iter)
+    with torch.no_grad():
+        for idx in range(total_len):
+            data = next(dataloader_iter)
+            data = move_to_cuda(data, device)
+            input_ids = data["input_ids"]
+            if idx < 3:
+                print(f"rank {local_rank}: {input_ids[:2, :10]}")
+            output = model(input_ids, return_dict=True)
+            logits = output.logits
+            ppl = perplexity_func(logits, input_ids)
+            ppls.append(ppl)
+            if idx % 10 == 0:
+                print(f"rank {local_rank} batch {idx}: {torch.tensor(ppls).mean()}")
+
+    ppl = torch.tensor(ppls).mean()
+    print(f"rank {local_rank}: test ppl={ppl:.4f}")
+    return ppl
 
 
 def main():
@@ -297,14 +360,10 @@ def main():
         enable_hierarchical_alltoall=args.hierarchical_alltoall,
         enable_kernel=args.use_kernel,
     )
-    # config.num_hidden_layers = 4
-    # config.hidden_size = 128
-    # config.intermediate_size = 32
     print(config)
     print(args)
-    # with skip_init():
-    #     model = OpenMoeForCausalLM(config)
-    model = OpenMoeForCausalLM(config)
+    with skip_init():
+        model = OpenMoeForCausalLM(config)
     params = sum([p.numel() for p in model.parameters()])
     coordinator.print_on_master(f"Finish init model with config:\n{config} #params={params}")
 
@@ -318,10 +377,18 @@ def main():
         collate_fn = None
     else:
         dataset = load_dataset(args.dataset, args.task_name)
-        dataset = dataset["train"]
-        collate_fn = partial(tokenize_data, tokenizer=tokenizer, max_length=args.max_length)
-    dataloader = plugin.prepare_dataloader(
-        dataset, batch_size=args.batch_size, shuffle=True, drop_last=True, collate_fn=collate_fn
+        collate_fn = partial(tokenize_data, args=args, tokenizer=tokenizer, max_length=args.max_length)
+    if 'validation' in dataset:
+        train_valid_dataset = concatenate_datasets([dataset["train"], dataset["validation"]])
+        train_dataloader_local = plugin.prepare_dataloader(
+            train_valid_dataset, batch_size=args.batch_size, shuffle=True, drop_last=True, collate_fn=collate_fn
+        )
+    else:
+        train_dataloader_local = plugin.prepare_dataloader(
+            dataset["train"], batch_size=args.batch_size, shuffle=True, drop_last=True, collate_fn=collate_fn
+        )
+    test_dataloader_local = plugin.prepare_dataloader(
+        dataset["test"], batch_size=args.batch_size, shuffle=False, drop_last=False, collate_fn=collate_fn
     )
 
     # Set optimizer
@@ -331,16 +398,35 @@ def main():
     booster = Booster(plugin=plugin, **booster_kwargs)
     if not test_mode:
         load_ckpt(repo_name, model, booster)
-    model, optimizer, _, dataloader, _ = booster.boost(model=model, optimizer=optimizer, dataloader=dataloader)
+    if args.valid_only:
+        assert args.valid_ckpt_path is not None, "please specify the checkpoint file(*.pth) path via --valid_ckpt_path"
+        valid_ckpt_path = args.valid_ckpt_path
+        assert valid_ckpt_path is not None, "Please specify the checkpoint file(*.pth) path"
+        ckpt = torch.load(valid_ckpt_path)
+        state_dict = {}
+        for key, value in ckpt.items():
+            if key.startswith("module."):
+                state_dict[key[7:]] = value
+            else:
+                state_dict[key] = value
+        model.load_state_dict(state_dict)
+        model, optimizer, _, test_dataloader, _ = booster.boost(model=model, optimizer=optimizer, dataloader=test_dataloader_local)
+    else:
+        model, optimizer, _, train_dataloader, _ = booster.boost(model=model, optimizer=optimizer, dataloader=train_dataloader_local)
     use_pipeline = isinstance(booster.plugin, MoeHybridParallelPlugin) and booster.plugin.pp_size > 1
     is_pp_last_stage = use_pipeline and booster.plugin.stage_manager.is_last_stage()
     coordinator.print_on_master(f"Finish init booster")
 
+    if args.valid_only:
+        coordinator.print_on_master(f"Start testing")
+        validate(args, test_dataloader, model, tokenizer)
+        coordinator.print_on_master(f"Finish testing")
+        return
+
     # Start finetuning
-    coordinator.print_on_master(f"Start finetuning")
     for epoch in range(args.num_epoch):
         model.train()
-        train_dataloader_iter = iter(dataloader)
+        train_dataloader_iter = iter(train_dataloader)
         total_len = len(train_dataloader_iter)
         with tqdm(
             range(total_len),

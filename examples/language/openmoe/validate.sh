@@ -8,20 +8,26 @@ SEQ_LENGTH=2048
 BATCH_SIZE=4
 LR=0.000015
 PP_SIZE=1
-DP_SIZE=2                                       
+DP_SIZE=2
 EP_SIZE=2
 
-export CUDA_VISIBLE_DEVICES=2,4
+export CUDA_VISIBLE_DEVICES=1,3
 
 OUTPUT_BASEPATH='./outputs'
 current_time=$(date "+%Y.%m.%d-%H.%M.%S")
 LOG_PATH=${OUTPUT_BASEPATH}/${current_time}
 mkdir -p ${LOG_PATH}
 
+if echo "$@" | grep -q -- "--valid_ckpt_path"; then
+    echo "Found --valid_ckpt_path"
+else
+    echo "please specify --valid_ckpt_path"
+    exit 1
+fi
 
 # ep zero
 plugin="ep_zero" # ep/ep_zero/hybrid
-NAME="gpt-${MODEL}-lr${LR}-bs${BATCH_SIZE}-gpus${NUM_GPUS}-plugin${plugin}-pp${PP_SIZE}-dp${DP_SIZE}-ep${EP_SIZE}"
+NAME="valid-gpt-${MODEL}-lr${LR}-bs${BATCH_SIZE}-gpus${NUM_GPUS}-plugin${plugin}-pp${PP_SIZE}-dp${DP_SIZE}-ep${EP_SIZE}"
 
 # 检查参数中是否包含 --comment
 if [[ "$@" =~ "--comment" ]]; then
@@ -40,6 +46,8 @@ if [[ "$@" =~ "--comment" ]]; then
         ((OPTIND++))
     done
 fi
+echo $NAME
+
 
 colossalai run --master_port 6689 --nproc_per_node $NUM_GPUS train.py \
     --num_epoch 50 \

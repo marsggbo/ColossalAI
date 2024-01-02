@@ -14,6 +14,8 @@ from colossalai.moe.manager import MOE_MANAGER
 from colossalai.moe.routers import MoeRouter, get_router_cls
 from colossalai.moe.utils import create_ep_hierarchical_group, get_noise_generator
 from colossalai.tensor.moe_tensor.api import get_dp_group, get_ep_group, get_ep_group_ranks, get_ep_size
+import json
+from colossalai.moe.get_id import mle_id, twonn_pytorch
 
 
 class SparseMLP(nn.Module):
@@ -45,6 +47,11 @@ class SparseMLP(nn.Module):
         https://arxiv.org/abs/2201.05596
     """
 
+    # for tracking the global id of this layer
+    layer_count = 0
+    all_layer_expert_inputs_info = {}
+    profile_id = False
+
     def __init__(
         self,
         num_experts: int,
@@ -67,6 +74,11 @@ class SparseMLP(nn.Module):
         enable_hierarchical_comm: bool = False,
     ):
         super().__init__()
+        self.layer_id = SparseMLP.layer_count
+        self.expert_inputs_info = {}
+        SparseMLP.layer_count += 1
+        SparseMLP.all_layer_expert_inputs_info.update({self.layer_id: {}})
+        self.tokens_for_experts = [[] for _ in range(num_experts)]
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
         self.num_experts = num_experts
@@ -173,8 +185,56 @@ class SparseMLP(nn.Module):
             dispatch_data = MoeDispatch.apply(tokens, *route_result_list[1:])
             dispatch_data = dispatch_data.reshape(self.num_experts, -1, self.hidden_size)
         else:
-            sec_mask_f = route_result_list[1].type_as(inputs)
+            sec_mask_f = route_result_list[1].type_as(inputs) # (num_tokens, num_experts, capacity)
             dispatch_data = torch.matmul(sec_mask_f.permute(1, 2, 0), tokens)
+
+        # profile expert input
+        if SparseMLP.profile_id:
+            ######################
+            # analyze expert inputs
+            ######################
+            # 计算专家输入的 token 掩码
+            token_mask_for_experts = sec_mask_f.sum(-1).bool()
+            for i in range(self.num_experts):
+                # 获取第 i 个专家的 token
+                crt_token = tokens[token_mask_for_experts[:, i]]
+                if len(crt_token) > 0:
+                    # 如果有 token，将其添加到专家的 token 列表中
+                    self.tokens_for_experts[i].append(crt_token)
+                if len(crt_token) > 2:
+                    # 如果 token 数大于 2，使用 mle_id 或 twonn_pytorch 计算 id 值
+                    id_value = twonn_pytorch(crt_token.float())
+                else:
+                    # 否则，尝试使用最近 8 个 token 计算 id 值
+                    try:
+                        id_value = twonn_pytorch(torch.cat(self.tokens_for_experts[i][-8:], dim=0).float())
+                    except Exception as e:
+                        id_value = 0.
+                
+                # 如果专家的 id 值大于 0，则将其添加到专家输入信息中
+                if i not in self.expert_inputs_info:
+                    self.expert_inputs_info[i] = []
+                self.expert_inputs_info[i].append(id_value)
+
+            # 更新所有层的专家输入信息
+            SparseMLP.all_layer_expert_inputs_info[self.layer_id].update(self.expert_inputs_info)
+            
+            # 如果是最后一层，则计算所有层的专家输入统计信息
+            if self.layer_id == SparseMLP.layer_count - 1:
+                expert_inputs_statistics = []
+                for layer_id, expert_inputs_info in SparseMLP.all_layer_expert_inputs_info.items():
+                    exper_id_mean_values = []
+                    for expert_id, id_values in expert_inputs_info.items():
+                        exper_id_mean_values.append(torch.tensor(id_values).mean().item())
+                    expert_inputs_statistics.append(exper_id_mean_values)
+                
+                # 将统计信息保存为 JSON 文件和 CSV 文件
+                with open(f"expert_input_statistics.json", 'w') as f:
+                    json.dump(SparseMLP.all_layer_expert_inputs_info, f, indent=4)
+                with open(f"expert_input_statistics.csv", "a") as f:
+                    f.write('\n\nA new forward pass\n\n')
+                    for exper_id_mean_values in expert_inputs_statistics:
+                        f.write(','.join([f"{x:.6f}" for x in exper_id_mean_values]) + '\n')
 
         # expert_output: (num_groups, num_experts, capacity, hidden_size)
         if self.expert_parallel == "EP":

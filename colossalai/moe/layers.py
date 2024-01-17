@@ -159,13 +159,77 @@ class SparseMLP(nn.Module):
             torch.Tensor: The output tensor of shape (batch_size, seq_len, hidden_size)
         """
         # reshape the input tokens
-        # func = lambda x:(x.min().item(), x.mean().item(), x.max().item())
         tokens = inputs.reshape(-1, self.hidden_size)
 
         # the data type of the inputs in the gating should be fp32
         fp32_input = tokens.to(torch.float)
         fp32_weight = self.gate_weight.to(torch.float)
         gate_output = F.linear(fp32_input, fp32_weight)
+
+        # inference: no load balance
+        if not self.training:
+            weights, selected_experts = torch.topk(
+                gate_output, 2
+            )
+            weights = nn.functional.softmax(
+                weights,
+                dim=1,
+                dtype=torch.float,
+            ).type_as(inputs) # (num_tokens, 2)
+            results = torch.zeros_like(tokens) # (num_tokens, dim)
+            for i in range(self.num_experts):
+                crt_tokens = None
+                is_valid_tokens = True
+                batch_idx, nth_expert = torch.where(selected_experts == i) # (num_selected_experts, 1)
+                if batch_idx.numel()==0 or nth_expert.numel()==0:
+                    num_tokens = 0.
+                    id_value = 0.
+                    is_valid_tokens = False
+                else:
+                    num_tokens = batch_idx.numel()
+                    crt_tokens = tokens[batch_idx]
+                    try:
+                        id_value = twonn_pytorch(crt_tokens.float())
+                    except Exception as e:
+                        # print(f"layer{self.layer_id}-expert{i} {crt_tokens.shape}")
+                        id_value = 0.
+
+                # 更新当前专家历史输入信息
+                if i not in self.expert_inputs_info:
+                    self.expert_inputs_info[i] = {
+                        'num_tokens_per_expert': [],
+                        'id_value_per_expert': []
+                    }
+                self.expert_inputs_info[i]['num_tokens_per_expert'].append(num_tokens)
+                self.expert_inputs_info[i]['id_value_per_expert'].append(id_value)
+
+                # 如果有有效的输入数据
+                if is_valid_tokens:
+                    results[batch_idx] += weights[batch_idx, nth_expert, None] * self.experts(
+                        tokens[batch_idx], i
+                    )
+                # print(f"expert{i} has {len(batch_idx)} input tokens")
+                
+            SparseMLP.all_layer_expert_inputs_info[self.layer_id].update(self.expert_inputs_info)
+
+            # 如果是最后一层，则计算所有层的专家输入统计信息
+            if self.layer_id == SparseMLP.layer_count - 1:
+                expert_inputs_statistics = [[], []]
+                for layer_id, expert_inputs_info in SparseMLP.all_layer_expert_inputs_info.items():
+                    num_tokens_per_expert = []
+                    id_value_per_expert = []
+                    for expert_index, values in expert_inputs_info.items():
+                        num_tokens = values['num_tokens_per_expert']
+                        id_values = values['id_value_per_expert']
+                        num_tokens_per_expert.append(torch.tensor(num_tokens).float().mean().item())
+                        id_value_per_expert.append(torch.tensor(id_values).mean().item())
+                    expert_inputs_statistics[0].append(num_tokens_per_expert)
+                    expert_inputs_statistics[1].append(id_value_per_expert)
+                
+                # 将统计信息保存为 JSON 文件和 CSV 文件
+                with open(f"expert_input_statistics.json", 'w') as f:
+                    json.dump(SparseMLP.all_layer_expert_inputs_info, f, indent=4)
+            return results.view_as(inputs)
 
         # update expert load
         if self.enable_load_balance == True:
@@ -194,7 +258,7 @@ class SparseMLP(nn.Module):
             # analyze expert inputs
             ######################
             # 计算专家输入的 token 掩码
-            token_mask_for_experts = sec_mask_f.sum(-1).bool()
+            token_mask_for_experts = sec_mask_f.sum(-1).bool() # (num_tokens, num_experts)
             for i in range(self.num_experts):
                 # 获取第 i 个专家的 token
                 crt_token = tokens[token_mask_for_experts[:, i]]
@@ -261,11 +325,9 @@ class SparseMLP(nn.Module):
             ans = MoeCombine.apply(expert_output, *route_result_list)
         else:
             combine_weights = route_result_list[0].type_as(inputs)
-            # print(f"combine_weights: {func(combine_weights)}")
             combine_weights = combine_weights.view(combine_weights.shape[0], -1)
             expert_output = expert_output.view(-1, expert_output.shape[-1])
             ans = torch.matmul(combine_weights, expert_output)
-            # print(f"ans: {func(ans)}")
 
         ans = ans.reshape(inputs.shape)
         return ans

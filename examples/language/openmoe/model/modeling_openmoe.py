@@ -937,13 +937,18 @@ class OpenMoeForCausalLM(OpenMoePreTrainedModel):
                         shift_logits = logits[..., :-1, :].contiguous().float()
                         shift_labels = inputs[1][..., 1:].contiguous()
                         # Flatten the tokens
-                        loss = self._calculate_loss(shift_logits, shift_labels)
+                        if self.module.training:
+                            loss = self._calculate_loss(shift_logits, shift_labels)
+                        else:
+                            loss = 0.
                         return loss
 
                     return custom_forward
 
-                aux_loss, z_loss = self._calculate_router_loss()
-                loss = aux_loss + z_loss
+                loss = 0
+                if self.training:
+                    aux_loss, z_loss = self._calculate_router_loss()
+                    loss = aux_loss + z_loss
                 ce_loss = 0
                 for batch_idx in range(hidden_states.shape[0]):
                     ce_loss = ce_loss + torch.utils.checkpoint.checkpoint(
@@ -962,10 +967,11 @@ class OpenMoeForCausalLM(OpenMoePreTrainedModel):
                 shift_logits = logits[..., :-1, :].contiguous()
                 shift_labels = labels[..., 1:].contiguous()
                 # Flatten the tokens
-                aux_loss, z_loss = self._calculate_router_loss()
-                loss = aux_loss + z_loss
-                ce_loss = self._calculate_loss(shift_logits, shift_labels)
-                loss = loss + ce_loss
+                if self.training:
+                    aux_loss, z_loss = self._calculate_router_loss()
+                    loss = aux_loss + z_loss
+                    ce_loss = self._calculate_loss(shift_logits, shift_labels)
+                    loss = loss + ce_loss
                 # loss = loss + self._calculate_loss(shift_logits, shift_labels)
                 # print(f"Loss aux:{aux_loss:.4f} z:{z_loss:.4f} ce:{ce_loss:.4f}")
 
@@ -1151,21 +1157,37 @@ if __name__ == '__main__':
     model = model.to(torch.cuda.current_device())
 
     # 生成模拟数据
-    seq_length = 2  # 序列长度
-    batch_size = 4  # 批次大小
-    vocab_size = 100  # 词汇表大小
+    seq_length = 512  # 序列长度
+    batch_size = 1  # 批次大小
+    vocab_size = 32000  # 词汇表大小
 
-    for i in range(4):
+    # 创建 CUDA 事件
+    start_event = torch.cuda.Event(enable_timing=True)
+    end_event = torch.cuda.Event(enable_timing=True)
+    num_iterations = 10  # 重复计时的次数
+    
+    total_time = 0.0
+    with torch.inference_mode():
         # 随机生成输入标识符（input_ids）
         input_ids = torch.randint(0, vocab_size, (batch_size, seq_length)).cuda()
-
         # 生成标签（labels）
         labels = torch.randint(0, vocab_size, (batch_size, seq_length)).cuda()
-
-        outputs = model(
-            input_ids=input_ids,
-            labels=labels,
-            chunk_head=False,
-            use_cache=True
-        )
-        print(outputs.logits.shape)
+        for i in range(num_iterations):
+            start_event.record()
+            outputs = model(
+                input_ids=input_ids,
+                # labels=labels,
+                chunk_head=False,
+                use_cache=True
+            )
+            end_event.record()
+            torch.cuda.synchronize()  # 等待 GPU 操作完成
+            next_token = torch.randint(0, vocab_size, (batch_size, 1)).cuda()
+            input_ids = torch.cat([input_ids, next_token], dim=-1)
+            inference_time = start_event.elapsed_time(end_event) / 1000  # 将毫秒转换成秒
+            if i > 0:
+                total_time += inference_time
+            print(f"inference time: {inference_time}s")
+        # 计算平均推理时间
+        average_time = total_time / num_iterations
+        print(f"Average inference time over {num_iterations} iterations: {average_time} seconds")

@@ -109,11 +109,29 @@ class MLPExperts(nn.Module):
         forward: hidden_size --> intermediate_size --> hidden_size
 
         Args:
-            x (torch.Tensor): The input tensor of shape (num_groups, num_experts, capacity, hidden_size)
+            x (torch.Tensor): The input tensor of shape (num_groups, num_experts, capacity, hidden_size) # training
+            x (torch.Tensor): (num_tokens, hidden_size) # inference
 
         Returns:
             torch.Tensor: The output tensor of shape (num_groups, num_experts, capacity, hidden_size)
         """
+        # inference
+        if not self.training:
+            if self.gated:
+                x_gate = torch.mm(x, self.wi_gate[param_slice])
+                x_up = torch.mm(x, self.wi_up[param_slice])
+                if self.use_kernel and HAS_TRITON and self.act_name == "swiglu":
+                    x = LlamaActCombine.apply(x_gate, x_up)
+                else:
+                    x = self.act(x_gate) * x_up
+            else:
+                x = torch.mm(x, self.wi[param_slice])
+                x = self.act(x)
+            x = self.drop(x)
+            x = torch.mm(x, self.wo[param_slice])
+            
+            return x
+
         x = MoeInGradScaler.apply(x, self.ep_size)
 
         e = x.size(1)

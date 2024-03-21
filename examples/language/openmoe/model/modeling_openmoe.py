@@ -198,8 +198,10 @@ def apply_rotary_embedding(q, k, cos, sin, decode=False, rotary_index=None):
     assert batch == kbatch, f"{batch} != {kbatch}"
     assert d == kd, f"{d} != {kd}"
     if decode and qlen == 1 and rotary_index is not None:
-        qcos = cos[rotary_index + 1, :]
-        qsin = sin[rotary_index + 1, :]
+        qcos = cos[rotary_index, :]
+        qsin = sin[rotary_index, :]
+        # qcos = cos[rotary_index + 1, :]
+        # qsin = sin[rotary_index + 1, :]
         qcos = qcos.unsqueeze(2)
         qsin = qsin.unsqueeze(2)
         kcos, ksin = cos[:klen, :], sin[:klen, :]
